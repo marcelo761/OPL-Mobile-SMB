@@ -91,6 +91,16 @@ public final class OplSmbServer {
         smb.setServerName("OPLMOBILE");
         smb.setDomainName("WORKGROUP");
         smb.setHostAnnouncer(false);
+
+        // OPL connects directly by IP to the native SMB-over-TCP port below.
+        // Disable the legacy NetBIOS SMB listener so Android does not try to bind
+        // privileged ports 137/138/139. Keep the high-port mappings as a safeguard
+        // if NetBIOS is enabled again later.
+        smb.setNetBIOSSMB(false);
+        smb.setNameServerPort(1137);
+        smb.setDatagramPort(1138);
+        smb.setSessionPort(1139);
+
         smb.setTcpipSMB(true);
         smb.setTcpipSMBPort(PORT);
 
