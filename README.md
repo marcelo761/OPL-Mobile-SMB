@@ -11,7 +11,10 @@ Android app that turns the phone itself into an SMBv1 game server for **Open PS2
 - Uses TCP port **4450**, so root is not required.
 - Exposes the share as **PS2SMB** with guest access.
 - Keeps a foreground service, CPU wake lock and Wi-Fi lock while the server is active.
-- Lists and deletes local ISOs from the app.
+- Gerencia e desinstala ISOs e jogos USBUtil pelo app, mostrando o tamanho de cada jogo e o espaço ocupado/livre do armazenamento.
+- Selects internal storage or a USB/SD volume as the `PS2SMB` root.
+- Reads existing USBUtil/USBExtreme `ul.cfg` + `ul.*` installations.
+- Installs an ISO directly as USBUtil, splitting it into 1 GiB chunks and updating `ul.cfg` only after a successful copy.
 
 ## OPL configuration
 
@@ -23,7 +26,7 @@ In OPL network/SMB settings use:
 Server / IP: <phone IP shown in app>
 Port:        4450
 Share:       PS2SMB
-User:        (empty)
+User:        GUEST
 Password:    (empty)
 ```
 
@@ -69,4 +72,18 @@ SMBv1 is an obsolete protocol. This app is intentionally designed for a trusted 
 
 ## Current status
 
-Source-complete proof of concept. It still needs to be built and tested on a physical Android device + PS2/OPL combination. In particular, OPL/JFileServer negotiation should be verified on the exact OPL build you use before treating it as production-ready.
+Source build for direct Android-to-OPL SMBv1 serving. The app keeps the Android-specific NetBIOS ports disabled/remapped and uses native SMB-over-TCP on port 4450. Test USBUtil installs with a copy of your data before relying on it as the only copy of a game image.
+
+
+## Armazenamento removível e USBUtil
+
+- A tela **Selecionar armazenamento / pendrive** lista os volumes locais detectados pelo Android.
+- Quando um volume é escolhido, a raiz dele vira a raiz do share `PS2SMB`.
+- ISOs continuam em `DVD/` e `CD/`.
+- USBExtreme/USBUtil é reconhecido diretamente pela combinação `ul.cfg` + arquivos `ul.*` na raiz.
+- No Android 11+, servir a raiz de um volume via JFileServer/NIO requer conceder **Acesso a todos os arquivos** ao app.
+- O botão **Instalar como USBUtil** recebe uma ISO, nome, Game ID e tipo CD/DVD.
+- O instalador gera `ul.<CRC32>.<GAME_ID>.00`, `.01`, ... em partes de até 1 GiB, seguindo o `iso2opl` do OPL.
+- `ul.cfg` só é atualizado no fim; se a cópia falhar antes, as partes criadas pela tentativa são removidas.
+- A atualização de `ul.cfg` é feita por arquivo temporário + troca, preservando entradas existentes.
+- A tela **Gerenciar jogos** mostra formato, tamanho, Game ID/partes e permite desinstalar com confirmação. Para USBUtil, os chunks são preparados por rename e o `ul.cfg` é reescrito atomicamente; em caso de falha antes da troca, os nomes originais são restaurados.

@@ -12,12 +12,14 @@ import android.os.Build;
 import android.os.IBinder;
 import android.os.PowerManager;
 
+import java.io.File;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 public class SmbService extends Service {
     public static final String ACTION_START = "com.oplmobilesmb.START";
     public static final String ACTION_STOP = "com.oplmobilesmb.STOP";
+    public static final String ACTION_RESTART = "com.oplmobilesmb.RESTART";
     private static final String CHANNEL_ID = "opl_smb";
     private static final int NOTIFICATION_ID = 4450;
 
@@ -43,8 +45,17 @@ public class SmbService extends Service {
             return START_NOT_STICKY;
         }
 
-        startForeground(NOTIFICATION_ID, buildNotification("Iniciando servidor SMB…"));
-        executor.execute(this::startServer);
+        startForeground(NOTIFICATION_ID, buildNotification(
+                ACTION_RESTART.equals(action) ? "Trocando armazenamento SMB…" : "Iniciando servidor SMB…"));
+
+        if (ACTION_RESTART.equals(action)) {
+            executor.execute(() -> {
+                stopServerOnly();
+                startServer();
+            });
+        } else {
+            executor.execute(this::startServer);
+        }
         return START_STICKY;
     }
 
@@ -52,8 +63,12 @@ public class SmbService extends Service {
         if (running) return;
         try {
             StoragePaths.ensure(this);
+            File root = StoragePaths.root(this);
+            if (!root.isDirectory()) throw new IllegalStateException("Raiz SMB não existe: " + root);
+            if (!root.canRead()) throw new IllegalStateException("Sem acesso de leitura à raiz SMB: " + root);
+
             acquireLocks();
-            smbServer = new OplSmbServer(StoragePaths.root(this));
+            smbServer = new OplSmbServer(root);
             smbServer.start();
             running = true;
             lastError = null;
@@ -66,7 +81,7 @@ public class SmbService extends Service {
         }
     }
 
-    private void stopServerAndSelf() {
+    private void stopServerOnly() {
         try {
             if (smbServer != null) smbServer.stop();
         } catch (Exception ignored) {
@@ -74,9 +89,13 @@ public class SmbService extends Service {
             smbServer = null;
             running = false;
             releaseLocks();
-            stopForeground(STOP_FOREGROUND_REMOVE);
-            stopSelf();
         }
+    }
+
+    private void stopServerAndSelf() {
+        stopServerOnly();
+        stopForeground(STOP_FOREGROUND_REMOVE);
+        stopSelf();
     }
 
     private String endpointText() {
@@ -85,16 +104,20 @@ public class SmbService extends Service {
     }
 
     private void acquireLocks() {
-        PowerManager pm = (PowerManager) getSystemService(POWER_SERVICE);
-        wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "OPLMobileSMB:Server");
-        wakeLock.setReferenceCounted(false);
-        wakeLock.acquire();
+        if (wakeLock == null) {
+            PowerManager pm = (PowerManager) getSystemService(POWER_SERVICE);
+            wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "OPLMobileSMB:Server");
+            wakeLock.setReferenceCounted(false);
+            wakeLock.acquire();
+        }
 
-        WifiManager wm = (WifiManager) getApplicationContext().getSystemService(Context.WIFI_SERVICE);
-        if (wm != null) {
-            wifiLock = wm.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "OPLMobileSMB:WiFi");
-            wifiLock.setReferenceCounted(false);
-            wifiLock.acquire();
+        if (wifiLock == null) {
+            WifiManager wm = (WifiManager) getApplicationContext().getSystemService(Context.WIFI_SERVICE);
+            if (wm != null) {
+                wifiLock = wm.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "OPLMobileSMB:WiFi");
+                wifiLock.setReferenceCounted(false);
+                wifiLock.acquire();
+            }
         }
     }
 
@@ -147,11 +170,7 @@ public class SmbService extends Service {
 
     @Override
     public void onDestroy() {
-        if (running || smbServer != null) {
-            try { if (smbServer != null) smbServer.stop(); } catch (Exception ignored) {}
-            running = false;
-        }
-        releaseLocks();
+        if (running || smbServer != null) stopServerOnly();
         executor.shutdownNow();
         super.onDestroy();
     }
