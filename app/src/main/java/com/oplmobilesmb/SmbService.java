@@ -62,10 +62,10 @@ public class SmbService extends Service {
     private void startServer() {
         if (running) return;
         try {
-            StoragePaths.ensure(this);
-            File root = StoragePaths.root(this);
-            if (!root.isDirectory()) throw new IllegalStateException("Raiz SMB não existe: " + root);
-            if (!root.canRead()) throw new IllegalStateException("Sem acesso de leitura à raiz SMB: " + root);
+            StoragePaths.AccessResult access = StoragePaths.validate(this, false);
+            if (!access.ok)
+                throw new IllegalStateException(access.message + " [" + access.root.getAbsolutePath() + "]");
+            File root = access.root;
 
             acquireLocks();
             smbServer = new OplSmbServer(root);

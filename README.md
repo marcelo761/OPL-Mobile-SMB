@@ -87,3 +87,12 @@ Source build for direct Android-to-OPL SMBv1 serving. The app keeps the Android-
 - `ul.cfg` só é atualizado no fim; se a cópia falhar antes, as partes criadas pela tentativa são removidas.
 - A atualização de `ul.cfg` é feita por arquivo temporário + troca, preservando entradas existentes.
 - A tela **Gerenciar jogos** mostra formato, tamanho, Game ID/partes e permite desinstalar com confirmação. Para USBUtil, os chunks são preparados por rename e o `ul.cfg` é reescrito atomicamente; em caso de falha antes da troca, os nomes originais são restaurados.
+
+
+## 0.4.1 - correção de armazenamento removível
+
+- A seleção de USB/SD agora persiste o UUID do volume em vez de depender apenas de `/storage/XXXX-XXXX`.
+- Apenas volumes montados em modo leitura/escrita aparecem como destino.
+- Antes de aceitar um pendrive, o app faz um teste real de leitura/escrita e valida o espaço reportado.
+- O servidor SMB não inicia quando a raiz está desmontada/stale; a interface mostra o motivo em vez de `0 B / ocupação indisponível`.
+- O caminho do volume é resolvido novamente quando o Android remonta o dispositivo.

@@ -1,807 +1,1 @@
-package com.oplmobilesmb;
-
-import android.Manifest;
-import android.app.Activity;
-import android.app.AlertDialog;
-import android.content.ContentResolver;
-import android.content.Intent;
-import android.content.pm.PackageManager;
-import android.database.Cursor;
-import android.graphics.Color;
-import android.net.Uri;
-import android.os.Build;
-import android.os.Bundle;
-import android.os.Environment;
-import android.os.Handler;
-import android.os.Looper;
-import android.provider.OpenableColumns;
-import android.provider.Settings;
-import android.view.Gravity;
-import android.view.View;
-import android.widget.Button;
-import android.widget.EditText;
-import android.widget.LinearLayout;
-import android.widget.RadioButton;
-import android.widget.RadioGroup;
-import android.widget.ProgressBar;
-import android.widget.ScrollView;
-import android.widget.TextView;
-import android.widget.Toast;
-
-import java.io.File;
-import java.io.FileOutputStream;
-import java.io.InputStream;
-import java.text.DecimalFormat;
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.Comparator;
-import java.util.List;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-
-public class MainActivity extends Activity {
-    private static final int REQUEST_ISO = 1001;
-    private static final int REQUEST_NOTIFICATIONS = 1002;
-    private static final int REQUEST_STORAGE = 1003;
-    private static final int REQUEST_USBUTIL = 1004;
-
-    private final Handler handler = new Handler(Looper.getMainLooper());
-    private final ExecutorService io = Executors.newSingleThreadExecutor();
-
-    private TextView serverStatus;
-    private TextView connectionInfo;
-    private TextView storagePath;
-    private TextView storageInfo;
-    private TextView copyStatus;
-    private ProgressBar copyProgress;
-    private ProgressBar storageUsage;
-    private LinearLayout gamesContainer;
-    private Button startStopButton;
-    private String pendingFolder = "DVD";
-    private boolean restartAfterStoragePermission;
-
-    private final Runnable uiTicker = new Runnable() {
-        @Override public void run() {
-            refreshServerStatus();
-            handler.postDelayed(this, 1000);
-        }
-    };
-
-    @Override
-    protected void onCreate(Bundle savedInstanceState) {
-        super.onCreate(savedInstanceState);
-        if (hasSelectedStorageAccess()) StoragePaths.ensure(this);
-        setContentView(buildUi());
-        refreshAll();
-        requestNotificationPermissionIfNeeded();
-    }
-
-    @Override
-    protected void onResume() {
-        super.onResume();
-        handler.post(uiTicker);
-        if (hasSelectedStorageAccess()) {
-            StoragePaths.ensure(this);
-            if (restartAfterStoragePermission) {
-                restartAfterStoragePermission = false;
-                startSmbService(SmbService.ACTION_START);
-            }
-        }
-        refreshAll();
-    }
-
-    @Override
-    protected void onPause() {
-        handler.removeCallbacks(uiTicker);
-        super.onPause();
-    }
-
-    @Override
-    protected void onDestroy() {
-        io.shutdownNow();
-        super.onDestroy();
-    }
-
-    private View buildUi() {
-        int pad = dp(18);
-        ScrollView scroll = new ScrollView(this);
-        scroll.setFillViewport(true);
-        scroll.setBackgroundColor(Color.rgb(17, 19, 24));
-
-        LinearLayout root = new LinearLayout(this);
-        root.setOrientation(LinearLayout.VERTICAL);
-        root.setPadding(pad, pad, pad, dp(36));
-        scroll.addView(root);
-
-        TextView title = text("OPL Mobile SMB", 28, Color.WHITE);
-        title.setTypeface(null, 1);
-        root.addView(title);
-        TextView sub = text("Seu Android vira o servidor SMBv1 do Open PS2 Loader.", 15, Color.LTGRAY);
-        sub.setPadding(0, dp(4), 0, dp(18));
-        root.addView(sub);
-
-        root.addView(sectionTitle("Servidor"));
-        serverStatus = text("Parado", 18, Color.WHITE);
-        root.addView(serverStatus);
-        connectionInfo = text("", 15, Color.LTGRAY);
-        connectionInfo.setPadding(0, dp(5), 0, dp(12));
-        root.addView(connectionInfo);
-
-        startStopButton = button("INICIAR SERVIDOR SMB");
-        startStopButton.setOnClickListener(v -> toggleServer());
-        root.addView(startStopButton, matchWrap());
-
-        TextView oplHint = text("No OPL: IP = endereÃ§o abaixo, porta = 4450, share = PS2SMB, usuÃ¡rio = GUEST, senha vazia.", 14, Color.LTGRAY);
-        oplHint.setPadding(0, dp(10), 0, dp(22));
-        root.addView(oplHint);
-
-        root.addView(sectionTitle("Armazenamento dos jogos"));
-        storagePath = text("", 14, Color.WHITE);
-        storagePath.setPadding(0, 0, 0, dp(8));
-        root.addView(storagePath);
-
-        Button chooseStorage = button("Selecionar armazenamento / pendrive");
-        chooseStorage.setOnClickListener(v -> chooseStorageRoot());
-        root.addView(chooseStorage, matchWrap());
-
-        storageInfo = text("", 14, Color.LTGRAY);
-        storageInfo.setPadding(0, dp(10), 0, dp(6));
-        root.addView(storageInfo);
-
-        storageUsage = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
-        storageUsage.setMax(1000);
-        LinearLayout.LayoutParams storageBarParams = matchWrap();
-        storageBarParams.setMargins(0, 0, 0, dp(20));
-        root.addView(storageUsage, storageBarParams);
-
-        root.addView(sectionTitle("Adicionar jogo"));
-        LinearLayout addRow = new LinearLayout(this);
-        addRow.setOrientation(LinearLayout.HORIZONTAL);
-        Button addDvd = button("+ ISO DVD");
-        Button addCd = button("+ ISO CD");
-        addDvd.setOnClickListener(v -> chooseIso("DVD"));
-        addCd.setOnClickListener(v -> chooseIso("CD"));
-        addRow.addView(addDvd, weightParams());
-        addRow.addView(addCd, weightParams());
-        root.addView(addRow, matchWrap());
-
-        Button addUsbUtil = button("+ Instalar como USBUtil");
-        addUsbUtil.setOnClickListener(v -> chooseUsbUtil());
-        LinearLayout.LayoutParams usbButtonParams = matchWrap();
-        usbButtonParams.setMargins(0, dp(8), 0, 0);
-        root.addView(addUsbUtil, usbButtonParams);
-
-        copyProgress = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
-        copyProgress.setMax(1000);
-        copyProgress.setVisibility(View.GONE);
-        copyProgress.setPadding(0, dp(12), 0, 0);
-        root.addView(copyProgress, matchWrap());
-        copyStatus = text("", 13, Color.LTGRAY);
-        root.addView(copyStatus);
-
-        LinearLayout header = new LinearLayout(this);
-        header.setGravity(Gravity.CENTER_VERTICAL);
-        TextView gamesTitle = sectionTitle("Gerenciar jogos");
-        header.addView(gamesTitle, weightParams());
-        Button refresh = button("Atualizar");
-        refresh.setOnClickListener(v -> refreshGames());
-        header.addView(refresh, new LinearLayout.LayoutParams(dp(120), dp(48)));
-        root.addView(header, matchWrap());
-
-        gamesContainer = new LinearLayout(this);
-        gamesContainer.setOrientation(LinearLayout.VERTICAL);
-        root.addView(gamesContainer, matchWrap());
-
-        TextView usbUtilHint = text(
-                "USBUtil/USBExtreme: o app pode empacotar uma ISO diretamente na raiz selecionada, criando ul.cfg + ul.*. " +
-                "Jogos USBUtil existentes tambÃ©m sÃ£o reconhecidos e podem ser desinstalados com atualizaÃ§Ã£o segura do ul.cfg; ISOs normais ficam em DVD/ ou CD/.", 12, Color.GRAY);
-        usbUtilHint.setPadding(0, dp(24), 0, 0);
-        root.addView(usbUtilHint);
-
-        return scroll;
-    }
-
-    private void toggleServer() {
-        if (!hasSelectedStorageAccess()) {
-            requestSelectedStorageAccess();
-            return;
-        }
-        startSmbService(SmbService.running ? SmbService.ACTION_STOP : SmbService.ACTION_START);
-        handler.postDelayed(this::refreshServerStatus, 300);
-    }
-
-    private void startSmbService(String action) {
-        Intent intent = new Intent(this, SmbService.class).setAction(action);
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && !SmbService.ACTION_STOP.equals(action))
-            startForegroundService(intent);
-        else
-            startService(intent);
-    }
-
-    private void refreshServerStatus() {
-        String ip = NetworkUtils.getLocalIpv4();
-        if (SmbService.running) {
-            serverStatus.setText("â— SMB ATIVO");
-            serverStatus.setTextColor(Color.rgb(99, 211, 138));
-            startStopButton.setText("PARAR SERVIDOR");
-        } else {
-            serverStatus.setText(SmbService.lastError == null ? "â— SMB PARADO" : "â— ERRO NO SMB");
-            serverStatus.setTextColor(SmbService.lastError == null ? Color.LTGRAY : Color.rgb(255, 107, 107));
-            startStopButton.setText("INICIAR SERVIDOR SMB");
-        }
-
-        connectionInfo.setText(
-                "IP: " + (ip == null ? "sem rede local" : ip) +
-                "\nPorta: " + OplSmbServer.PORT +
-                "\nShare: " + OplSmbServer.SHARE +
-                (SmbService.lastError != null ? "\nErro: " + SmbService.lastError : ""));
-    }
-
-    private void chooseStorageRoot() {
-        List<StoragePaths.StorageRoot> roots = StoragePaths.availableRoots(this);
-        if (roots.isEmpty()) {
-            Toast.makeText(this, "Nenhum armazenamento encontrado", Toast.LENGTH_LONG).show();
-            return;
-        }
-
-        String current = StoragePaths.root(this).getAbsolutePath();
-        String[] labels = new String[roots.size()];
-        int checked = -1;
-        for (int i = 0; i < roots.size(); i++) {
-            StoragePaths.StorageRoot item = roots.get(i);
-            labels[i] = item.label + "\n" + item.root.getAbsolutePath();
-            if (item.root.getAbsolutePath().equals(current)) checked = i;
-        }
-
-        new AlertDialog.Builder(this)
-                .setTitle("Onde ficam os jogos?")
-                .setSingleChoiceItems(labels, checked, (dialog, which) -> {
-                    dialog.dismiss();
-                    applyStorageRoot(roots.get(which));
-                })
-                .setNegativeButton("Cancelar", null)
-                .show();
-    }
-
-    private void applyStorageRoot(StoragePaths.StorageRoot selected) {
-        boolean wasRunning = SmbService.running;
-        StoragePaths.setRoot(this, selected.root);
-        SmbService.lastError = null;
-
-        if (!selected.appPrivate && !hasBroadStorageAccess()) {
-            if (wasRunning) startSmbService(SmbService.ACTION_STOP);
-            restartAfterStoragePermission = wasRunning;
-            refreshAll();
-            new AlertDialog.Builder(this)
-                    .setTitle("Permitir acesso ao armazenamento")
-                    .setMessage("Para servir um pendrive/armazenamento compartilhado diretamente pelo SMB, o app precisa de acesso amplo aos arquivos desse volume. Nenhum arquivo Ã© enviado para a internet.")
-                    .setNegativeButton("Agora nÃ£o", null)
-                    .setPositiveButton("Permitir", (d, w) -> requestBroadStorageAccess())
-                    .show();
-            return;
-        }
-
-        StoragePaths.ensure(this);
-        if (wasRunning) startSmbService(SmbService.ACTION_RESTART);
-        refreshAll();
-    }
-
-    private boolean hasSelectedStorageAccess() {
-        return StoragePaths.isDefaultRoot(this) || hasBroadStorageAccess();
-    }
-
-    private boolean hasBroadStorageAccess() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R)
-            return Environment.isExternalStorageManager();
-        return checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED;
-    }
-
-    private void requestSelectedStorageAccess() {
-        if (StoragePaths.isDefaultRoot(this)) return;
-        requestBroadStorageAccess();
-    }
-
-    private void requestBroadStorageAccess() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            try {
-                Intent intent = new Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
-                        Uri.parse("package:" + getPackageName()));
-                startActivity(intent);
-            } catch (Exception e) {
-                startActivity(new Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION));
-            }
-        } else {
-            requestPermissions(new String[]{
-                    Manifest.permission.READ_EXTERNAL_STORAGE,
-                    Manifest.permission.WRITE_EXTERNAL_STORAGE
-            }, REQUEST_STORAGE);
-        }
-    }
-
-    private void chooseIso(String folder) {
-        if (!hasSelectedStorageAccess()) {
-            requestSelectedStorageAccess();
-            return;
-        }
-        pendingFolder = folder;
-        launchIsoPicker(REQUEST_ISO);
-    }
-
-    private void chooseUsbUtil() {
-        if (!hasSelectedStorageAccess()) {
-            requestSelectedStorageAccess();
-            return;
-        }
-        launchIsoPicker(REQUEST_USBUTIL);
-    }
-
-    private void launchIsoPicker(int requestCode) {
-        Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
-        intent.addCategory(Intent.CATEGORY_OPENABLE);
-        intent.setType("*/*");
-        startActivityForResult(intent, requestCode);
-    }
-
-    @Override
-    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
-        super.onActivityResult(requestCode, resultCode, data);
-        if ((requestCode != REQUEST_ISO && requestCode != REQUEST_USBUTIL) ||
-                resultCode != RESULT_OK || data == null || data.getData() == null) return;
-
-        Uri uri = data.getData();
-        FileMeta meta = queryMeta(uri);
-        if (meta.name == null || !meta.name.toLowerCase().endsWith(".iso")) {
-            Toast.makeText(this, "Escolha um arquivo .iso", Toast.LENGTH_LONG).show();
-            return;
-        }
-
-        StoragePaths.ensure(this);
-        if (requestCode == REQUEST_USBUTIL) {
-            File root = StoragePaths.root(this);
-            if (!root.isDirectory() || !root.canWrite()) {
-                Toast.makeText(this, "Sem permissÃ£o para gravar no armazenamento escolhido", Toast.LENGTH_LONG).show();
-                return;
-            }
-            showUsbUtilInstallDialog(uri, meta);
-            return;
-        }
-
-        File targetDir = "CD".equals(pendingFolder) ? StoragePaths.cd(this) : StoragePaths.dvd(this);
-        if (!targetDir.isDirectory() || !targetDir.canWrite()) {
-            Toast.makeText(this, "Sem permissÃ£o para gravar no armazenamento escolhido", Toast.LENGTH_LONG).show();
-            return;
-        }
-        File target = new File(targetDir, safeName(meta.name));
-        if (target.exists()) {
-            new AlertDialog.Builder(this)
-                    .setTitle("Arquivo jÃ¡ existe")
-                    .setMessage("Substituir " + target.getName() + "?")
-                    .setNegativeButton("Cancelar", null)
-                    .setPositiveButton("Substituir", (d, w) -> copyIso(uri, target, meta.size))
-                    .show();
-        } else {
-            copyIso(uri, target, meta.size);
-        }
-    }
-
-    private void showUsbUtilInstallDialog(Uri uri, FileMeta meta) {
-        String fileTitle = meta.name.substring(0, meta.name.length() - 4).trim();
-        String detectedId = UsbUtilInstaller.extractGameId(fileTitle);
-        if (!detectedId.isBlank()) {
-            fileTitle = fileTitle.replaceFirst("(?i)^" + java.util.regex.Pattern.quote(detectedId) + "[ ._-]*", "").trim();
-        }
-        if (fileTitle.isBlank()) fileTitle = "PS2 Game";
-        if (fileTitle.length() > 31) fileTitle = fileTitle.substring(0, 31).trim();
-
-        LinearLayout form = new LinearLayout(this);
-        form.setOrientation(LinearLayout.VERTICAL);
-        int pad = dp(20);
-        form.setPadding(pad, dp(8), pad, 0);
-
-        TextView destination = text("Destino: " + StoragePaths.root(this).getAbsolutePath(), 13, Color.LTGRAY);
-        destination.setPadding(0, 0, 0, dp(8));
-        form.addView(destination);
-
-        EditText titleInput = new EditText(this);
-        titleInput.setHint("Nome do jogo (mÃ¡x. 31 bytes)");
-        titleInput.setSingleLine(true);
-        titleInput.setText(fileTitle);
-        form.addView(titleInput, matchWrap());
-
-        EditText idInput = new EditText(this);
-        idInput.setHint("Game ID, ex.: SLUS_202.16");
-        idInput.setSingleLine(true);
-        idInput.setText(detectedId);
-        form.addView(idInput, matchWrap());
-
-        TextView mediaLabel = text("Tipo de mÃ­dia", 14, Color.LTGRAY);
-        mediaLabel.setPadding(0, dp(8), 0, 0);
-        form.addView(mediaLabel);
-
-        RadioGroup mediaGroup = new RadioGroup(this);
-        mediaGroup.setOrientation(RadioGroup.HORIZONTAL);
-        RadioButton dvd = new RadioButton(this);
-        dvd.setText("DVD");
-        dvd.setId(View.generateViewId());
-        RadioButton cd = new RadioButton(this);
-        cd.setText("CD");
-        cd.setId(View.generateViewId());
-        mediaGroup.addView(dvd);
-        mediaGroup.addView(cd);
-        if (meta.size > 0 && meta.size <= 900L * 1024 * 1024) cd.setChecked(true);
-        else dvd.setChecked(true);
-        form.addView(mediaGroup);
-
-        int expected = UsbUtilInstaller.partCount(meta.size);
-        TextView info = text(
-                (meta.size > 0 ? "ISO: " + formatBytes(meta.size) + (expected > 0 ? " â€¢ " + expected + " parte(s) de atÃ© 1 GiB" : "") : "ISO: tamanho desconhecido") +
-                "\nO ul.cfg sÃ³ Ã© atualizado depois que todas as partes terminarem.", 12, Color.GRAY);
-        info.setPadding(0, dp(8), 0, 0);
-        form.addView(info);
-
-        AlertDialog dialog = new AlertDialog.Builder(this)
-                .setTitle("Instalar como USBUtil")
-                .setView(form)
-                .setNegativeButton("Cancelar", null)
-                .setPositiveButton("Instalar", null)
-                .create();
-
-        dialog.setOnShowListener(ignored -> dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(v -> {
-            try {
-                String title = UsbUtilInstaller.validateTitle(titleInput.getText().toString());
-                String gameId = UsbUtilInstaller.normalizeGameId(idInput.getText().toString());
-                int media = cd.isChecked() ? UsbUtilInstaller.MEDIA_CD : UsbUtilInstaller.MEDIA_DVD;
-                installUsbUtil(uri, meta.size, title, gameId, media);
-                dialog.dismiss();
-            } catch (IllegalArgumentException e) {
-                Toast.makeText(this, e.getMessage(), Toast.LENGTH_LONG).show();
-            }
-        }));
-        dialog.show();
-    }
-
-    private void installUsbUtil(Uri uri, long total, String title, String gameId, int media) {
-        copyProgress.setVisibility(View.VISIBLE);
-        copyProgress.setIndeterminate(total <= 0);
-        copyProgress.setProgress(0);
-        copyStatus.setText("Empacotando " + title + " como USBUtilâ€¦");
-        File root = StoragePaths.root(this);
-
-        io.execute(() -> {
-            try (InputStream in = getContentResolver().openInputStream(uri)) {
-                UsbUtilInstaller.InstallResult result = UsbUtilInstaller.install(
-                        in, root, title, gameId, media, total,
-                        (copied, sourceTotal, currentPart, expectedParts) -> runOnUiThread(() ->
-                                updateUsbUtilProgress(copied, sourceTotal, currentPart, expectedParts)));
-
-                runOnUiThread(() -> {
-                    copyProgress.setIndeterminate(false);
-                    copyProgress.setProgress(1000);
-                    copyStatus.setText("USBUtil concluÃ­do: " + result.title + " â€¢ " + result.parts + " parte(s) â€¢ " + formatBytes(result.bytes));
-                    Toast.makeText(this, "Instalado no pendrive: " + result.firstPartName(), Toast.LENGTH_LONG).show();
-                    refreshAll();
-                });
-            } catch (Exception e) {
-                String msg = e.getMessage() != null ? e.getMessage() : e.toString();
-                runOnUiThread(() -> {
-                    copyProgress.setIndeterminate(false);
-                    copyStatus.setText("Erro USBUtil: " + msg);
-                    Toast.makeText(this, msg, Toast.LENGTH_LONG).show();
-                    refreshAll();
-                });
-            }
-        });
-    }
-
-    private void updateUsbUtilProgress(long copied, long total, int currentPart, int expectedParts) {
-        String partText = expectedParts > 0 ? "parte " + currentPart + "/" + expectedParts : "parte " + currentPart;
-        if (total > 0) {
-            copyProgress.setIndeterminate(false);
-            int p = (int) Math.min(1000, copied * 1000L / total);
-            copyProgress.setProgress(p);
-            copyStatus.setText("Empacotando USBUtilâ€¦ " + (p / 10.0) + "% â€” " + formatBytes(copied) + " / " + formatBytes(total) + " â€” " + partText);
-        } else {
-            copyStatus.setText("Empacotando USBUtilâ€¦ " + formatBytes(copied) + " â€” " + partText);
-        }
-    }
-
-    private void copyIso(Uri uri, File target, long total) {
-        copyProgress.setVisibility(View.VISIBLE);
-        copyProgress.setIndeterminate(false);
-        copyProgress.setProgress(0);
-        copyStatus.setText("Copiando " + target.getName() + "â€¦");
-
-        io.execute(() -> {
-            File part = new File(target.getParentFile(), "." + target.getName() + ".part");
-            long copied = 0;
-            try (InputStream in = getContentResolver().openInputStream(uri);
-                 FileOutputStream out = new FileOutputStream(part)) {
-                if (in == null) throw new IllegalStateException("NÃ£o foi possÃ­vel abrir a ISO");
-                byte[] buf = new byte[1024 * 1024];
-                int n;
-                long lastUi = 0;
-                while ((n = in.read(buf)) >= 0) {
-                    if (n == 0) continue;
-                    out.write(buf, 0, n);
-                    copied += n;
-                    long now = System.currentTimeMillis();
-                    if (now - lastUi > 250) {
-                        long c = copied;
-                        runOnUiThread(() -> updateCopyProgress(c, total));
-                        lastUi = now;
-                    }
-                }
-                out.getFD().sync();
-                if (target.exists() && !target.delete()) throw new IllegalStateException("NÃ£o consegui substituir a ISO antiga");
-                if (!part.renameTo(target)) throw new IllegalStateException("NÃ£o consegui finalizar o arquivo");
-                runOnUiThread(() -> {
-                    copyProgress.setProgress(1000);
-                    copyStatus.setText("ConcluÃ­do: " + target.getName());
-                    refreshAll();
-                });
-            } catch (Exception e) {
-                part.delete();
-                String msg = e.getMessage() != null ? e.getMessage() : e.toString();
-                runOnUiThread(() -> {
-                    copyStatus.setText("Erro: " + msg);
-                    Toast.makeText(this, "Falha ao copiar ISO", Toast.LENGTH_LONG).show();
-                });
-            }
-        });
-    }
-
-    private void updateCopyProgress(long copied, long total) {
-        if (total > 0) {
-            int p = (int) Math.min(1000, copied * 1000L / total);
-            copyProgress.setProgress(p);
-            copyStatus.setText("Copiandoâ€¦ " + (p / 10.0) + "% â€” " + formatBytes(copied) + " / " + formatBytes(total));
-        } else {
-            copyStatus.setText("Copiandoâ€¦ " + formatBytes(copied));
-        }
-    }
-
-    private void refreshAll() {
-        refreshServerStatus();
-        File root = StoragePaths.root(this);
-        storagePath.setText("Raiz compartilhada: " + root.getAbsolutePath());
-
-        if (!hasSelectedStorageAccess()) {
-            storageInfo.setText("Acesso ao armazenamento pendente. Toque em â€œSelecionar armazenamento / pendriveâ€ ou inicie o servidor para conceder acesso.");
-            storageUsage.setProgress(0);
-            gamesContainer.removeAllViews();
-            gamesContainer.addView(text("Sem acesso ao armazenamento selecionado.", 15, Color.LTGRAY));
-            return;
-        }
-
-        StoragePaths.ensure(this);
-        long free = root.getUsableSpace();
-        long total = root.getTotalSpace();
-        List<GameEntry> games = scanGames();
-        long libraryBytes = 0;
-        for (GameEntry game : games) if (game.bytes > 0) libraryBytes += game.bytes;
-        long used = total > 0 ? Math.max(0, total - free) : 0;
-        int usedPermille = total > 0 ? (int) Math.min(1000, used * 1000L / total) : 0;
-        storageUsage.setProgress(usedPermille);
-
-        int usbUtilCount = 0;
-        for (GameEntry game : games) if (game.usbUtil != null) usbUtilCount++;
-        String usedPct = total > 0 ? new DecimalFormat("0.0").format(usedPermille / 10.0) + "% usado" : "ocupaÃ§Ã£o indisponÃ­vel";
-        storageInfo.setText(
-                formatBytes(free) + " livres de " + formatBytes(total) + " â€¢ " + usedPct +
-                "\nBiblioteca OPL: " + games.size() + " jogo(s) â€¢ " + formatBytes(libraryBytes) +
-                (usbUtilCount > 0 ? " â€¢ " + usbUtilCount + " USBUtil" : ""));
-        renderGames(games);
-    }
-
-    private void refreshGames() {
-        if (!hasSelectedStorageAccess()) return;
-        renderGames(scanGames());
-    }
-
-    private List<GameEntry> scanGames() {
-        List<GameEntry> games = new ArrayList<>();
-        collectIso(games, "ISO DVD", StoragePaths.dvd(this));
-        collectIso(games, "ISO CD", StoragePaths.cd(this));
-        for (UsbUtilGames.Game game : UsbUtilGames.read(StoragePaths.root(this))) {
-            String details = "USBUtil " + game.mediaName() + " â€¢ " + game.parts + " parte" + (game.parts == 1 ? "" : "s");
-            if (game.bytes >= 0) details += " â€¢ " + formatBytes(game.bytes);
-            if (!game.gameId.isBlank()) details += "\n" + game.gameId;
-            games.add(GameEntry.usbUtil(game, details));
-        }
-        games.sort(Comparator.comparing(g -> g.title.toLowerCase()));
-        return games;
-    }
-
-    private void renderGames(List<GameEntry> games) {
-        gamesContainer.removeAllViews();
-        if (games.isEmpty()) {
-            TextView empty = text("Nenhuma ISO ou entrada USBUtil encontrada.", 15, Color.LTGRAY);
-            empty.setPadding(0, dp(12), 0, 0);
-            gamesContainer.addView(empty);
-            return;
-        }
-
-        for (GameEntry game : games) {
-            LinearLayout row = new LinearLayout(this);
-            row.setOrientation(LinearLayout.HORIZONTAL);
-            row.setGravity(Gravity.CENTER_VERTICAL);
-            row.setPadding(0, dp(8), 0, dp(8));
-
-            TextView info = text(game.title + "\n" + game.details, 15, Color.WHITE);
-            row.addView(info, weightParams());
-
-            Button manage = button("Desinstalar");
-            manage.setOnClickListener(v -> confirmDelete(game));
-            row.addView(manage, new LinearLayout.LayoutParams(dp(118), dp(48)));
-            gamesContainer.addView(row, matchWrap());
-        }
-    }
-
-    private void confirmDelete(GameEntry game) {
-        String sizeText = game.bytes >= 0 ? formatBytes(game.bytes) : "tamanho desconhecido";
-        String kind = game.usbUtil != null ? "USBUtil" : "ISO";
-        String message = "Desinstalar " + game.title + "?\n\nFormato: " + kind +
-                "\nEspaÃ§o a liberar: " + sizeText +
-                (game.usbUtil != null ? "\nO registro correspondente tambÃ©m serÃ¡ removido do ul.cfg." : "");
-        new AlertDialog.Builder(this)
-                .setTitle("Desinstalar jogo")
-                .setMessage(message)
-                .setNegativeButton("Cancelar", null)
-                .setPositiveButton("Desinstalar", (d, w) -> uninstallGame(game))
-                .show();
-    }
-
-    private void uninstallGame(GameEntry game) {
-        copyProgress.setVisibility(View.VISIBLE);
-        copyProgress.setIndeterminate(true);
-        copyStatus.setText("Desinstalando " + game.title + "â€¦");
-        io.execute(() -> {
-            try {
-                if (game.usbUtil != null) {
-                    UsbUtilManager.RemoveResult result = UsbUtilManager.uninstall(StoragePaths.root(this), game.usbUtil);
-                    runOnUiThread(() -> {
-                        copyProgress.setIndeterminate(false);
-                        copyProgress.setProgress(1000);
-                        String msg = "Desinstalado: " + result.title + " â€¢ " + formatBytes(result.bytes) + " liberados";
-                        if (result.hasLeftovers()) msg += " â€¢ atenÃ§Ã£o: sobrou " + (result.partsFound - result.partsDeleted) + " arquivo temporÃ¡rio";
-                        copyStatus.setText(msg);
-                        Toast.makeText(this, result.hasLeftovers() ? "Jogo removido do OPL; verifique arquivos temporÃ¡rios" : "Jogo desinstalado", Toast.LENGTH_LONG).show();
-                        refreshAll();
-                    });
-                } else {
-                    if (game.file == null || !game.file.isFile()) throw new IllegalStateException("ISO nÃ£o encontrada");
-                    if (!game.file.delete()) throw new IllegalStateException("NÃ£o consegui excluir a ISO");
-                    runOnUiThread(() -> {
-                        copyProgress.setIndeterminate(false);
-                        copyProgress.setProgress(1000);
-                        copyStatus.setText("Desinstalado: " + game.title + " â€¢ " + formatBytes(game.bytes) + " liberados");
-                        Toast.makeText(this, "Jogo desinstalado", Toast.LENGTH_SHORT).show();
-                        refreshAll();
-                    });
-                }
-            } catch (Exception e) {
-                String msg = e.getMessage() != null ? e.getMessage() : e.toString();
-                runOnUiThread(() -> {
-                    copyProgress.setIndeterminate(false);
-                    copyStatus.setText("Erro ao desinstalar: " + msg);
-                    Toast.makeText(this, msg, Toast.LENGTH_LONG).show();
-                    refreshAll();
-                });
-            }
-        });
-    }
-
-    private static void collectIso(List<GameEntry> out, String kind, File dir) {
-        File[] files;
-        try {
-            files = dir.listFiles((d, name) -> name.toLowerCase().endsWith(".iso"));
-        } catch (SecurityException e) {
-            return;
-        }
-        if (files == null) return;
-        Arrays.sort(files, Comparator.comparing(File::getName));
-        for (File f : files) {
-            if (f.isFile()) out.add(GameEntry.iso(f, kind + " â€¢ " + formatBytes(f.length())));
-        }
-    }
-
-    private FileMeta queryMeta(Uri uri) {
-        String name = null;
-        long size = -1;
-        ContentResolver resolver = getContentResolver();
-        try (Cursor c = resolver.query(uri, new String[]{OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE}, null, null, null)) {
-            if (c != null && c.moveToFirst()) {
-                int ni = c.getColumnIndex(OpenableColumns.DISPLAY_NAME);
-                int si = c.getColumnIndex(OpenableColumns.SIZE);
-                if (ni >= 0) name = c.getString(ni);
-                if (si >= 0 && !c.isNull(si)) size = c.getLong(si);
-            }
-        }
-        return new FileMeta(name, size);
-    }
-
-    private static String safeName(String name) {
-        return name.replace('/', '_').replace('\\', '_').replace('\0', '_').trim();
-    }
-
-    private void requestNotificationPermissionIfNeeded() {
-        if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
-            requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS}, REQUEST_NOTIFICATIONS);
-        }
-    }
-
-    private TextView sectionTitle(String value) {
-        TextView v = text(value, 20, Color.WHITE);
-        v.setTypeface(null, 1);
-        v.setPadding(0, dp(8), 0, dp(10));
-        return v;
-    }
-
-    private TextView text(String value, int sp, int color) {
-        TextView v = new TextView(this);
-        v.setText(value);
-        v.setTextSize(sp);
-        v.setTextColor(color);
-        return v;
-    }
-
-    private Button button(String label) {
-        Button b = new Button(this);
-        b.setText(label);
-        b.setAllCaps(false);
-        return b;
-    }
-
-    private LinearLayout.LayoutParams matchWrap() {
-        return new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
-    }
-
-    private LinearLayout.LayoutParams weightParams() {
-        LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
-        p.setMargins(dp(3), 0, dp(3), 0);
-        return p;
-    }
-
-    private int dp(int value) {
-        return Math.round(value * getResources().getDisplayMetrics().density);
-    }
-
-    private static String formatBytes(long bytes) {
-        if (bytes < 0) return "?";
-        String[] units = {"B", "KB", "MB", "GB", "TB"};
-        double n = bytes;
-        int i = 0;
-        while (n >= 1024 && i < units.length - 1) { n /= 1024; i++; }
-        return new DecimalFormat(i == 0 ? "0" : "0.00").format(n) + " " + units[i];
-    }
-
-    private static final class FileMeta {
-        final String name;
-        final long size;
-        FileMeta(String name, long size) { this.name = name; this.size = size; }
-    }
-
-    private static final class GameEntry {
-        final String title;
-        final String details;
-        final File file;
-        final UsbUtilGames.Game usbUtil;
-        final long bytes;
-
-        private GameEntry(String title, String details, File file, UsbUtilGames.Game usbUtil, long bytes) {
-            this.title = title;
-            this.details = details;
-            this.file = file;
-            this.usbUtil = usbUtil;
-            this.bytes = bytes;
-        }
-
-        static GameEntry iso(File file, String details) {
-            return new GameEntry(file.getName(), details, file, null, file.length());
-        }
-
-        static GameEntry usbUtil(UsbUtilGames.Game game, String details) {
-            return new GameEntry(game.title, details, null, game, game.bytes);
-        }
-    }
-}
+YªçŠx-®éÜj×¢ëiºÚ+Š§j[h‘éÜ¢éí×m¶å:-jZ.¶›­–)Ş³W6¶vR6öÒæ÷ÆÖö&–ÆW6Ö#° ¦–×÷'BæG&ö–BäÖæ–fW7C°¦–×÷'BæG&ö–Bæä7F—f—G“°¦–×÷'BæG&ö–BæäÆW'DF–Æös°¦–×÷'BæG&ö–Bæ6öçFVçBä6öçFVçE&W6öÇfW#°¦–×÷'BæG&ö–Bæ6öçFVçBä–çFVçC°¦–×÷'BæG&ö–Bæ6öçFVçBçÒå6¶vTÖævW#°¦–×÷'BæG&ö–BæFF&6Rä7W'6÷#°¦–×÷'BæG&ö–Bæw&†–72ä6öÆ÷#°¦–×÷'BæG&ö–BææWBåW&“°¦–×÷'BæG&ö–Bæ÷2ä'V–ÆC°¦–×÷'BæG&ö–Bæ÷2ä'VæFÆS°¦–×÷'BæG&ö–Bæ÷2äVçf—&öæÖVçC°¦–×÷'BæG&ö–Bæ÷2ä†æFÆW#°¦–×÷'BæG&ö–Bæ÷2äÆö÷W#°¦–×÷'BæG&ö–Bç&÷f–FW"ä÷Væ&ÆT6öÇVÖç3°¦–×÷'BæG&ö–Bç&÷f–FW"å6WGF–æw3°¦–×÷'BæG&ö–Bçf–Wräw&f—G“°¦–×÷'BæG&ö–Bçf–Wråf–Ws°¦–×÷'BæG&ö–Bçv–FvWBä'WGFöã°¦–×÷'BæG&ö–Bçv–FvWBäVF—EFW‡C°¦–×÷'BæG&ö–Bçv–FvWBäÆ–æV$Æ–÷WC°¦–×÷'BæG&ö–Bçv–FvWBå&F–ô'WGFöã°¦–×÷'BæG&ö–Bçv–FvWBå&F–ôw&÷W°¦–×÷'BæG&ö–Bçv–FvWBå&öw&W74&#°¦–×÷'BæG&ö–Bçv–FvWBå67&öÆÅf–Ws°¦–×÷'BæG&ö–Bçv–FvWBåFW‡Ef–Ws°¦–×÷'BæG&ö–Bçv–FvWBåFö7C° ¦–×÷'B¦fæ–òäf–ÆS°¦–×÷'B¦fæ–òäf–ÆT÷WGWE7G&VÓ°¦–×÷'B¦fæ–òä–çWE7G&VÓ°¦–×÷'B¦fçFW‡BäFV6–ÖÄf÷&ÖC°¦–×÷'B¦fçWF–Âä'&”Æ—7C°¦–×÷'B¦fçWF–Âä'&—3°¦–×÷'B¦fçWF–Âä6ö×&F÷#°¦–×÷'B¦fçWF–ÂäÆ—7C°¦–×÷'B¦fçWF–Âæ6öæ7W'&VçBäW†V7WF÷%6W'f–6S°¦–×÷'B¦fçWF–Âæ6öæ7W'&VçBäW†V7WF÷'3° §V&Æ–26Æ72Ö–ä7F—f—G’W‡FVæG27F—f—G’°¢&—fFR7FF–2f–æÂ–çB$UTU5Eô•4òÒ°¢&—fFR7FF–2f–æÂ–çB$UTU5EôäõD”d”4D”ôå2Ò#°¢&—fFR7FF–2f–æÂ–çB$UTU5Eõ5Dõ$tRÒ3°¢&—fFR7FF–2f–æÂ–çB$UTU5EõU4%UD”ÂÒC° ¢&—fFRf–æÂ†æFÆW"†æFÆW"ÒæWr†æFÆW"„Æö÷W"ævWDÖ–äÆö÷W"‚’“°¢&—fFRf–æÂW†V7WF÷%6W'f–6R–òÒW†V7WF÷'2ææWu6–ævÆUF‡&VDW†V7WF÷"‚“° ¢&—fFRFW‡Ef–Wr6W'fW%7FGW3°¢&—fFRFW‡Ef–Wr6öææV7F–öä–æfó°¢&—fFRFW‡Ef–Wr7F÷&vUFƒ°¢&—fFRFW‡Ef–Wr7F÷&vT–æfó°¢&—fFRFW‡Ef–Wr6÷•7FGW3°¢&—fFR&öw&W74&"6÷•&öw&W73°¢&—fFR&öw&W74&"7F÷&vUW6vS°¢&—fFRÆ–æV$Æ–÷WBvÖW46öçF–æW#°¢&—fFR'WGFöâ7F'E7F÷'WGFöã°¢&—fFR7G&–ærVæF–ætföÆFW"Ò$EdB#°¢&—fFR&ööÆVâ&W7F'DgFW%7F÷&vUW&Ö—76–öã°¢&—fFR&ööÆVâfÆ–FFTgFW%7F÷&vUW&Ö—76–öã° ¢&—fFRf–æÂ'Vææ&ÆRV•F–6¶W"ÒæWr'Vææ&ÆR‚’°¢÷fW'&–FRV&Æ–2fö–B'Vâ‚’°¢&Vg&W6…6W'fW%7FGW2‚“°¢†æFÆW"ç÷7DFVÆ–VB‡F†—2Â“°¢Ğ¢Ó° ¢÷fW'&–FP¢&÷FV7FVBfö–Böä7&VFR„'VæFÆR6fVD–ç7Fæ6U7FFR’°¢7WW"æöä7&VFR‡6fVD–ç7Fæ6U7FFR“°¢–b††56VÆV7FVE7F÷&vT66W72‚’’7F÷&vUF‡2æVç7W&R‡F†—2“°¢6WD6öçFVçEf–Wr†'V–ÆEV’‚’“°¢&Vg&W6„ÆÂ‚“°¢&WVW7Dæ÷F–f–6F–öåW&Ö—76–öä–dæVVFVB‚“°¢Ğ ¢÷fW'&–FP¢&÷FV7FVBfö–Böå&W7VÖR‚’°¢7WW"æöå&W7VÖR‚“°¢†æFÆW"ç÷7B‡V•F–6¶W"“° ¢–b‡fÆ–FFTgFW%7F÷&vUW&Ö—76–öâbb†56VÆV7FVE7F÷&vT66W72‚’’°¢&ööÆVâ&W7F'BÒ&W7F'DgFW%7F÷&vUW&Ö—76–öã°¢fÆ–FFTgFW%7F÷&vUW&Ö—76–öâÒfÇ6S°¢&W7F'DgFW%7F÷&vUW&Ö—76–öâÒfÇ6S°¢6ö×ÆWFU7F÷&vU6VÆV7F–öâ‡&W7F'B“°¢&WGW&ã°¢Ğ ¢–b††56VÆV7FVE7F÷&vT66W72‚’’°¢7F÷&vUF‡2ä66W75&W7VÇB66W72Ò7F÷&vUF‡2çfÆ–FFR‡F†—2ÂfÇ6R“°¢–b†66W72æö²’7F÷&vUF‡2æVç7W&R‡F†—2“°¢Ğ¢&Vg&W6„ÆÂ‚“°¢Ğ ¢÷fW'&–FP¢&÷FV7FVBfö–BöåW6R‚’°¢†æFÆW"ç&VÖ÷fT6ÆÆ&6·2‡V•F–6¶W"“°¢7WW"æöåW6R‚“°¢Ğ ¢÷fW'&–FP¢&÷FV7FVBfö–BöäFW7G&÷’‚’°¢–òç6‡WFF÷väæ÷r‚“°¢7WW"æöäFW7G&÷’‚“°¢Ğ ¢&—fFRf–Wr'V–ÆEV’‚’°¢–çBBÒGƒ‚“°¢67&öÆÅf–Wr67&öÆÂÒæWr67&öÆÅf–Wr‡F†—2“°¢67&öÆÂç6WDf–ÆÅf–Ww÷'B‡G'VR“°¢67&öÆÂç6WD&6¶w&÷VæD6öÆ÷"„6öÆ÷"ç&v"ƒrÂ’Â#B’“° ¢Æ–æV$Æ–÷WB&ö÷BÒæWrÆ–æV$Æ–÷WB‡F†—2“°¢&ö÷Bç6WD÷&–VçFF–öâ„Æ–æV$Æ–÷WBådU%D”4Â“°¢&ö÷Bç6WEFF–ær‡BÂBÂBÂGƒ3b’“°¢67&öÆÂæFEf–Wr‡&ö÷B“° ¢FW‡Ef–WrF—FÆRÒFW‡B‚$õÂÖö&–ÆR4Ô""Â#‚Â6öÆ÷"åt„•DR“°¢F—FÆRç6WEG—Vf6R†çVÆÂÂ“°¢&ö÷BæFEf–Wr‡F—FÆR“°¢FW‡Ef–Wr7V"ÒFW‡B‚%6WRæG&ö–Bf—&ò6W'f–F÷"4Ô'cFò÷Vâ3"ÆöFW"â"ÂRÂ6öÆ÷"äÅDu$’“°¢7V"ç6WEFF–ærƒÂGƒB’ÂÂGƒ‚’“°¢&ö÷BæFEf–Wr‡7V"“° ¢&ö÷BæFEf–Wr‡6V7F–öåF—FÆR‚%6W'f–F÷""’“°¢6W'fW%7FGW2ÒFW‡B‚%&Fò"Â‚Â6öÆ÷"åt„•DR“°¢&ö÷BæFEf–Wr‡6W'fW%7FGW2“°¢6öææV7F–öä–æfòÒFW‡B‚""ÂRÂ6öÆ÷"äÅDu$’“°¢6öææV7F–öä–æfòç6WEFF–ærƒÂGƒR’ÂÂGƒ"’“°¢&ö÷BæFEf–Wr†6öææV7F–öä–æfò“° ¢7F'E7F÷'WGFöâÒ'WGFöâ‚$”ä”4”"4U%d”Dõ"4Ô""“°¢7F'E7F÷'WGFöâç6WDöä6Æ–6´Æ—7FVæW"‡bÓâFövvÆU6W'fW"‚’“°¢&ö÷BæFEf–Wr‡7F'E7F÷'WGFöâÂÖF6…w&‚’“° ¢FW‡Ef–Wr÷Ä†–çBÒFW‡B‚$æòõÃ¢•ÒVæFW&\:vò&—†òÂ÷'FÒCCSÂ6†&RÒ3%4Ô"ÂW7\:&–òÒuTU5BÂ6Væ†f¦–â"ÂBÂ6öÆ÷"äÅDu$’“°¢÷Ä†–çBç6WEFF–ærƒÂGƒ’ÂÂGƒ#"’“°¢&ö÷BæFEf–Wr†÷Ä†–çB“° ¢&ö÷BæFEf–Wr‡6V7F–öåF—FÆR‚$&Ö¦VæÖVçFòF÷2¦öv÷2"’“°¢7F÷&vUF‚ÒFW‡B‚""ÂBÂ6öÆ÷"åt„•DR“°¢7F÷&vUF‚ç6WEFF–ærƒÂÂÂGƒ‚’“°¢&ö÷BæFEf–Wr‡7F÷&vUF‚“° ¢'WGFöâ6†ö÷6U7F÷&vRÒ'WGFöâ‚%6VÆV6–öæ"&Ö¦VæÖVçFòòVæG&—fR"“°¢6†ö÷6U7F÷&vRç6WDöä6Æ–6´Æ—7FVæW"‡bÓâ6†ö÷6U7F÷&vU&ö÷B‚’“°¢&ö÷BæFEf–Wr†6†ö÷6U7F÷&vRÂÖF6…w&‚’“° ¢7F÷&vT–æfòÒFW‡B‚""ÂBÂ6öÆ÷"äÅDu$’“°¢7F÷&vT–æfòç6WEFF–ærƒÂGƒ’ÂÂGƒb’“°¢&ö÷BæFEf–Wr‡7F÷&vT–æfò“° ¢7F÷&vUW6vRÒæWr&öw&W74&"‡F†—2ÂçVÆÂÂæG&ö–Bå"æGG"ç&öw&W74&%7G–ÆT†÷&—¦öçFÂ“°¢7F÷&vUW6vRç6WDÖ‚ƒ“°¢Æ–æV$Æ–÷WBäÆ–÷WE&×27F÷&vT&%&×2ÒÖF6…w&‚“°¢7F÷&vT&%&×2ç6WDÖ&v–ç2ƒÂÂÂGƒ#’“°¢&ö÷BæFEf–Wr‡7F÷&vUW6vRÂ7F÷&vT&%&×2“° ¢&ö÷BæFEf–Wr‡6V7F–öåF—FÆR‚$F–6–öæ"¦övò"’“°¢Æ–æV$Æ–÷WBFE&÷rÒæWrÆ–æV$Æ–÷WB‡F†—2“°¢FE&÷rç6WD÷&–VçFF–öâ„Æ–æV$Æ–÷WBä„õ$•¤ôåDÂ“°¢'WGFöâFDGfBÒ'WGFöâ‚"²•4òEdB"“°¢'WGFöâFD6BÒ'WGFöâ‚"²•4ò4B"“°¢FDGfBç6WDöä6Æ–6´Æ—7FVæW"‡bÓâ6†ö÷6T—6ò‚$EdB"’“°¢FD6Bç6WDöä6Æ–6´Æ—7FVæW"‡bÓâ6†ö÷6T—6ò‚$4B"’“°¢FE&÷ræFEf–Wr†FDGfBÂvV–v‡E&×2‚’“°¢FE&÷ræFEf–Wr†FD6BÂvV–v‡E&×2‚’“°¢&ö÷BæFEf–Wr†FE&÷rÂÖF6…w&‚’“° ¢'WGFöâFEW6%WF–ÂÒ'WGFöâ‚"²–ç7FÆ"6öÖòU4%WF–Â"“°¢FEW6%WF–Âç6WDöä6Æ–6´Æ—7FVæW"‡bÓâ6†ö÷6UW6%WF–Â‚’“°¢Æ–æV$Æ–÷WBäÆ–÷WE&×2W6$'WGFöå&×2ÒÖF6…w&‚“°¢W6$'WGFöå&×2ç6WDÖ&v–ç2ƒÂGƒ‚’ÂÂ“°¢&ö÷BæFEf–Wr†FEW6%WF–ÂÂW6$'WGFöå&×2“° ¢6÷•&öw&W72ÒæWr&öw&W74&"‡F†—2ÂçVÆÂÂæG&ö–Bå"æGG"ç&öw&W74&%7G–ÆT†÷&—¦öçFÂ“°¢6÷•&öw&W72ç6WDÖ‚ƒ“°¢6÷•&öw&W72ç6WEf—6–&–Æ—G’…f–WrätôäR“°¢6÷•&öw&W72ç6WEFF–ærƒÂGƒ"’ÂÂ“°¢&ö÷BæFEf–Wr†6÷•&öw&W72ÂÖF6…w&‚’“°¢6÷•7FGW2ÒFW‡B‚""Â2Â6öÆ÷"äÅDu$’“°¢&ö÷BæFEf–Wr†6÷•7FGW2“° ¢Æ–æV$Æ–÷WB†VFW"ÒæWrÆ–æV$Æ–÷WB‡F†—2“°¢†VFW"ç6WDw&f—G’„w&f—G’ä4TåDU%õdU%D”4Â“°¢FW‡Ef–WrvÖW5F—FÆRÒ6V7F–öåF—FÆR‚$vW&Væ6–"¦öv÷2"“°¢†VFW"æFEf–Wr†vÖW5F—FÆRÂvV–v‡E&×2‚’“°¢'WGFöâ&Vg&W6‚Ò'WGFöâ‚$GVÆ—¦""“°¢&Vg&W6‚ç6WDöä6Æ–6´Æ—7FVæW"‡bÓâ&Vg&W6„vÖW2‚’“°¢†VFW"æFEf–Wr‡&Vg&W6‚ÂæWrÆ–æV$Æ–÷WBäÆ–÷WE&×2†Gƒ#’ÂGƒC‚’’“°¢&ö÷BæFEf–Wr††VFW"ÂÖF6…w&‚’“° ¢vÖW46öçF–æW"ÒæWrÆ–æV$Æ–÷WB‡F†—2“°¢vÖW46öçF–æW"ç6WD÷&–VçFF–öâ„Æ–æV$Æ–÷WBådU%D”4Â“°¢&ö÷BæFEf–Wr†vÖW46öçF–æW"ÂÖF6…w&‚’“° ¢FW‡Ef–WrW6%WF–Ä†–çBÒFW‡B€¢%U4%WF–ÂõU4$W‡G&VÖS¢òöFRV×6÷F"VÖ•4òF—&WFÖVçFRæ&—¢6VÆV6–öæFÂ7&–æFòVÂæ6fr²VÂâ¢â"°¢$¦öv÷2U4%WF–ÂW†—7FVçFW2FÖ,:–Ò<:6ò&V6öæ†V6–F÷2RöFVÒ6W"FW6–ç7FÆF÷26öÒGVÆ—¦:|:6ò6VwW&FòVÂæ6fs²•4÷2æ÷&Ö—2f–6ÒVÒEdBò÷R4Bòâ"Â"Â6öÆ÷"äu$’“°¢W6%WF–Ä†–çBç6WEFF–ærƒÂGƒ#B’ÂÂ“°¢&ö÷BæFEf–Wr‡W6%WF–Ä†–çB“° ¢&WGW&â67&öÆÃ°¢Ğ ¢&—fFRfö–BFövvÆU6W'fW"‚’°¢–b‚†56VÆV7FVE7F÷&vT66W72‚’’°¢&WVW7E6VÆV7FVE7F÷&vT66W72‚“°¢&WGW&ã°¢Ğ¢–b‚6Ö%6W'f–6Rç'Vææ–ær’°¢7F÷&vUF‡2ä66W75&W7VÇB66W72Ò7F÷&vUF‡2çfÆ–FFR‡F†—2ÂfÇ6R“°¢–b‚66W72æö²’°¢6Ö%6W'f–6RæÆ7DW'&÷"Ò$&Ö¦VæÖVçFó¢"²66W72æÖW76vS°¢Fö7BæÖ¶UFW‡B‡F†—2Â66W72æÖW76vRÂFö7BäÄTäuD…ôÄôär’ç6†÷r‚“°¢&Vg&W6„ÆÂ‚“°¢&WGW&ã°¢Ğ¢Ğ¢7F'E6Ö%6W'f–6R…6Ö%6W'f–6Rç'Vææ–ærò6Ö%6W'f–6Rä5D”ôåõ5Dõ¢6Ö%6W'f–6Rä5D”ôåõ5D%B“°¢†æFÆW"ç÷7DFVÆ–VB‡F†—3£§&Vg&W6…6W'fW%7FGW2Â3“°¢Ğ ¢&—fFRfö–B7F'E6Ö%6W'f–6R…7G&–ær7F–öâ’°¢–çFVçB–çFVçBÒæWr–çFVçB‡F†—2Â6Ö%6W'f–6Ræ6Æ72’ç6WD7F–öâ†7F–öâ“°¢–b„'V–ÆBådU%4”ôâå4Dµô”åBãÒ'V–ÆBådU%4”ôåô4ôDU2äòbb6Ö%6W'f–6Rä5D”ôåõ5DõæWVÇ2†7F–öâ’¢7F'Df÷&Vw&÷VæE6W'f–6R†–çFVçB“°¢VÇ6P¢7F'E6W'f–6R†–çFVçB“°¢Ğ ¢&—fFRfö–B&Vg&W6…6W'fW%7FGW2‚’°¢7G&–ær—ÒæWGv÷&µWF–Ç2ævWDÆö6Ä—cB‚“°¢–b…6Ö%6W'f–6Rç'Vææ–ær’°¢6W'fW%7FGW2ç6WEFW‡B‚.)xò4Ô"D•dò"“°¢6W'fW%7FGW2ç6WEFW‡D6öÆ÷"„6öÆ÷"ç&v"ƒ“’Â#Â3‚’“°¢7F'E7F÷'WGFöâç6WEFW‡B‚%$"4U%d”Dõ""“°¢ÒVÇ6R°¢6W'fW%7FGW2ç6WEFW‡B…6Ö%6W'f–6RæÆ7DW'&÷"ÓÒçVÆÂò.)xò4Ô"$Dò"¢.)xòU%$òäò4Ô""“°¢6W'fW%7FGW2ç6WEFW‡D6öÆ÷"…6Ö%6W'f–6RæÆ7DW'&÷"ÓÒçVÆÂò6öÆ÷"äÅDu$’¢6öÆ÷"ç&v"ƒ#SRÂrÂr’“°¢7F'E7F÷'WGFöâç6WEFW‡B‚$”ä”4”"4U%d”Dõ"4Ô""“°¢Ğ ¢6öææV7F–öä–æfòç6WEFW‡B€¢$•¢"²†—ÓÒçVÆÂò'6VÒ&VFRÆö6Â"¢—’°¢%Æå÷'F¢"²÷Å6Ö%6W'fW"åõ%B°¢%Æå6†&S¢"²÷Å6Ö%6W'fW"å4„$R°¢…6Ö%6W'f–6RæÆ7DW'&÷"ÒçVÆÂò%ÆäW'&ó¢"²6Ö%6W'f–6RæÆ7DW'&÷"¢""’“°¢Ğ ¢&—fFRfö–B6†ö÷6U7F÷&vU&ö÷B‚’°¢Æ—7CÅ7F÷&vUF‡2å7F÷&vU&ö÷Câ&ö÷G2Ò7F÷&vUF‡2æf–Æ&ÆU&ö÷G2‡F†—2“°¢–b‡&ö÷G2æ—4V×G’‚’’°¢Fö7BæÖ¶UFW‡B‡F†—2Â$æVæ‡VÒ&Ö¦VæÖVçFòVæ6öçG&Fò"ÂFö7BäÄTäuD…ôÄôär’ç6†÷r‚“°¢&WGW&ã°¢Ğ ¢7G&–ær7W'&VçBÒ7F÷&vUF‡2ç&ö÷B‡F†—2’ævWD'6öÇWFUF‚‚“°¢7G&–æuµÒÆ&VÇ2ÒæWr7G&–æu·&ö÷G2ç6—¦R‚•Ó°¢–çB6†V6¶VBÒÓ°¢f÷"†–çB’Ò²’Â&ö÷G2ç6—¦R‚“²’²²’°¢7F÷&vUF‡2å7F÷&vU&ö÷B—FVÒÒ&ö÷G2ævWB†’“°¢Æ&VÇ5¶•ÒÒ—FVÒæÆ&VÂ²%Æâ"²—FVÒç&ö÷BævWD'6öÇWFUF‚‚“°¢–b†—FVÒç&ö÷BævWD'6öÇWFUF‚‚’æWVÇ2†7W'&VçB’’6†V6¶VBÒ“°¢Ğ ¢æWrÆW'DF–Æörä'V–ÆFW"‡F†—2¢ç6WEF—FÆR‚$öæFRf–6Ò÷2¦öv÷3ò"¢ç6WE6–ævÆT6†ö–6T—FV×2†Æ&VÇ2Â6†V6¶VBÂ†F–ÆörÂv†–6‚’Óâ°¢F–ÆöræF—6Ö—72‚“°¢Ç•7F÷&vU&ö÷B‡&ö÷G2ævWB‡v†–6‚’“°¢Ò¢ç6WDæVvF—fT'WGFöâ‚$6æ6VÆ""ÂçVÆÂ¢ç6†÷r‚“°¢Ğ ¢&—fFRfö–BÇ•7F÷&vU&ö÷B…7F÷&vUF‡2å7F÷&vU&ö÷B6VÆV7FVB’°¢&ööÆVâv5'Vææ–ærÒ6Ö%6W'f–6Rç'Vææ–æs°¢–b‡v5'Vææ–ær’7F'E6Ö%6W'f–6R…6Ö%6W'f–6Rä5D”ôåõ5Dõ“° ¢7F÷&vUF‡2ç6WE&ö÷B‡F†—2Â6VÆV7FVB“°¢6Ö%6W'f–6RæÆ7DW'&÷"ÒçVÆÃ° ¢–b‚6VÆV7FVBæ&—fFRbb†4'&öE7F÷&vT66W72‚’’°¢&W7F'DgFW%7F÷&vUW&Ö—76–öâÒv5'Vææ–æs°¢fÆ–FFTgFW%7F÷&vUW&Ö—76–öâÒG'VS°¢&Vg&W6„ÆÂ‚“°¢æWrÆW'DF–Æörä'V–ÆFW"‡F†—2¢ç6WEF—FÆR‚%W&Ö—F—"6W76òò&Ö¦VæÖVçFò"¢ç6WDÖW76vR‚%&6W'f—"&—¢FòVæG&—fRF—&WFÖVçFRVÆò4Ô"ÂòæG&ö–B&V6—6Æ–&W&"(	†6W76òFöF÷2÷2'V—f÷>(	’âFWö—2FRW&Ö—F—"ÂòFW7FÆV—GW&ÂW67&—FRW7:vò&VÂçFW2FR6V—F"òföÇVÖRâ"¢ç6WDæVvF—fT'WGFöâ‚$v÷&ì:6ò"ÂçVÆÂ¢ç6WE÷6—F—fT'WGFöâ‚%W&Ö—F—""Â†BÂr’Óâ&WVW7D'&öE7F÷&vT66W72‚’¢ç6†÷r‚“°¢&WGW&ã°¢Ğ ¢6ö×ÆWFU7F÷&vU6VÆV7F–öâ‡v5'Vææ–ær“°¢Ğ ¢&—fFRfö–B6ö×ÆWFU7F÷&vU6VÆV7F–öâ†&ööÆVâ&W7F'E6W'fW"’°¢7F÷&vUF‡2ä66W75&W7VÇB66W72Ò7F÷&vUF‡2çfÆ–FFR‡F†—2ÂG'VR“°¢–b‚66W72æö²’°¢6Ö%6W'f–6RæÆ7DW'&÷"Ò$&Ö¦VæÖVçFó¢"²66W72æÖW76vS°¢&Vg&W6„ÆÂ‚“°¢æWrÆW'DF–Æörä'V–ÆFW"‡F†—2¢ç6WEF—FÆR‚%VæG&—fR–æF—7öì:×fVÂ"¢ç6WDÖW76vR†66W72æÖW76vR²%ÆåÆä6Ö–æ†òFWFV7FFó¢"²66W72ç&ö÷BævWD'6öÇWFUF‚‚’°¢%ÆåÆåFVçFR&VÖ÷fW"R&V6öæV7F"òVæG&—fRR6VÆV6–öæRÖòæ÷fÖVçFRâ"¢ç6WE÷6—F—fT'WGFöâ‚$ô²"ÂçVÆÂ¢ç6†÷r‚“°¢&WGW&ã°¢Ğ ¢7F÷&vUF‡2æVç7W&R‡F†—2“°¢6Ö%6W'f–6RæÆ7DW'&÷"ÒçVÆÃ°¢–b‡&W7F'E6W'fW"’7F'E6Ö%6W'f–6R…6Ö%6W'f–6Rä5D”ôåõ5D%B“°¢&Vg&W6„ÆÂ‚“°¢Ğ ¢&—fFR&ööÆVâ†56VÆV7FVE7F÷&vT66W72‚’°¢&WGW&â7F÷&vUF‡2æ—4FVfVÇE&ö÷B‡F†—2’ÇÂ†4'&öE7F÷&vT66W72‚“°¢Ğ ¢&—fFR&ööÆVâ†4'&öE7F÷&vT66W72‚’°¢–b„'V–ÆBådU%4”ôâå4Dµô”åBãÒ'V–ÆBådU%4”ôåô4ôDU2å"¢&WGW&âVçf—&öæÖVçBæ—4W‡FW&æÅ7F÷&vTÖævW"‚“°¢&WGW&â6†V6µ6VÆeW&Ö—76–öâ„Öæ–fW7BçW&Ö—76–öâåu$•DUôU…DU$äÅõ5Dõ$tR’ÓÒ6¶vTÖævW"åU$Ô•54”ôåôu$åDTC°¢Ğ ¢&—fFR&ööÆVâ&WV—&Uw&—F&ÆU7F÷&vR‚’°¢–b‚†56VÆV7FVE7F÷&vT66W72‚’’°¢&WVW7E6VÆV7FVE7F÷&vT66W72‚“°¢&WGW&âfÇ6S°¢Ğ¢7F÷&vUF‡2ä66W75&W7VÇB66W72Ò7F÷&vUF‡2çfÆ–FFR‡F†—2ÂG'VR“°¢–b‚66W72æö²’°¢Fö7BæÖ¶UFW‡B‡F†—2Â$&Ö¦VæÖVçFò–æF—7öì:×fVÃ¢"²66W72æÖW76vRÂFö7BäÄTäuD…ôÄôär’ç6†÷r‚“°¢&Vg&W6„ÆÂ‚“°¢&WGW&âfÇ6S°¢Ğ¢7F÷&vUF‡2æVç7W&R‡F†—2“°¢&WGW&âG'VS°¢Ğ ¢&—fFRfö–B&WVW7E6VÆV7FVE7F÷&vT66W72‚’°¢–b…7F÷&vUF‡2æ—4FVfVÇE&ö÷B‡F†—2’’&WGW&ã°¢&WVW7D'&öE7F÷&vT66W72‚“°¢Ğ ¢&—fFRfö–B&WVW7D'&öE7F÷&vT66W72‚’°¢–b„'V–ÆBådU%4”ôâå4Dµô”åBãÒ'V–ÆBådU%4”ôåô4ôDU2å"’°¢G'’°¢–çFVçB–çFVçBÒæWr–çFVçB…6WGF–æw2ä5D”ôåôÔätUôôÄÅôd”ÄU5ô44U55õU$Ô•54”ôâÀ¢W&’ç'6R‚'6¶vS¢"²vWE6¶vTæÖR‚’’“°¢7F'D7F—f—G’†–çFVçB“°¢Ò6F6‚„W†6WF–öâR’°¢7F'D7F—f—G’†æWr–çFVçB…6WGF–æw2ä5D”ôåôÔätUôÄÅôd”ÄU5ô44U55õU$Ô•54”ôâ’“°¢Ğ¢ÒVÇ6R°¢&WVW7EW&Ö—76–öç2†æWr7G&–æuµ×°¢Öæ–fW7BçW&Ö—76–öâå$TEôU…DU$äÅõ5Dõ$tRÀ¢Öæ–fW7BçW&Ö—76–öâåu$•DUôU…DU$äÅõ5Dõ$tP¢ÒÂ$UTU5Eõ5Dõ$tR“°¢Ğ¢Ğ ¢&—fFRfö–B6†ö÷6T—6ò…7G&–ærföÆFW"’°¢–b‚&WV—&Uw&—F&ÆU7F÷&vR‚’’&WGW&ã°¢VæF–ætföÆFW"ÒföÆFW#°¢ÆVæ6„—6õ–6¶W"…$UTU5Eô•4ò“°¢Ğ ¢&—fFRfö–B6†ö÷6UW6%WF–Â‚’°¢–b‚&WV—&Uw&—F&ÆU7F÷&vR‚’’&WGW&ã°¢ÆVæ6„—6õ–6¶W"…$UTU5EõU4%UD”Â“°¢Ğ ¢&—fFRfö–BÆVæ6„—6õ–6¶W"†–çB&WVW7D6öFR’°¢–çFVçB–çFVçBÒæWr–çFVçB„–çFVçBä5D”ôåôõTåôDô5TÔTåB“°¢–çFVçBæFD6FVv÷-¶Û›h‘éì¶»§q«^t¹µ…­•Q•áĞ¡Ñ¡¥Ì°€‰%¹ÍÑ…±…‘¼¹¼Á•¹‘É¥Ù”è€ˆ€¬É•ÍÕ±Ğ¹™¥ÉÍÑA…ÉÑ9…µ” ¤°Q½…ÍĞ¹19Q!}1=9¤¹Í¡½Ü ¤ì(€€€€€€€€€€€€€€€€€€€É•™É•Í¡±° ¤ì(€€€€€€€€€€€€€€€ô¤ì(€€€€€€€€€€€ô…Ñ €¡á•ÁÑ¥½¸”¤ì(€€€€€€€€€€€€€€€MÑÉ¥¹œµÍœ€ô”¹•Ñ5•ÍÍ…” ¤€„ô¹Õ±°€ü”¹•Ñ5•ÍÍ…” ¤€è”¹Ñ½MÑÉ¥¹œ ¤ì(€€€€€€€€€€€€€€€ÉÕ¹=¹U¥Q¡É•…  ¤€´øì(€€€€€€€€€€€€€€€€€€€½ÁåAÉ½É•ÍÌ¹Í•Ñ%¹‘•Ñ•Éµ¥¹…Ñ”¡™…±Í”¤ì(€€€€€€€€€€€€€€€€€€€½ÁåMÑ…ÑÕÌ¹Í•ÑQ•áĞ ‰ÉÉ¼UM	UÑ¥°è€ˆ€¬µÍœ¤ì(€€€€€€€€€€€€€€€€€€€Q½…ÍĞ¹µ…­•Q•áĞ¡Ñ¡¥Ì°µÍœ°Q½…ÍĞ¹19Q!}1=9¤¹Í¡½Ü ¤ì(€€€€€€€€€€€€€€€€€€€É•™É•Í¡±° ¤ì(€€€€€€€€€€€€€€€ô¤ì(€€€€€€€€€€€ô(€€€€€€€ô¤ì(€€€ô((€€€ÁÉ¥Ù…Ñ”Ù½¥ÕÁ‘…Ñ•UÍ‰UÑ¥±AÉ½É•ÍÌ¡±½¹œ½Á¥•°±½¹œÑ½Ñ…°°¥¹ĞÕÉÉ•¹ÑA…ÉĞ°¥¹Ğ•áÁ•Ñ•‘A…ÉÑÌ¤ì(€€€€€€€MÑÉ¥¹œÁ…ÉÑQ•áĞ€ô•áÁ•Ñ•‘A…ÉÑÌ€ø€À€ü€‰Á…ÉÑ”€ˆ€¬ÕÉÉ•¹ÑA…ÉĞ€¬€ˆ¼ˆ€¬•áÁ•Ñ•‘A…ÉÑÌ€è€‰Á…ÉÑ”€ˆ€¬ÕÉÉ•¹ÑA…ÉĞì(€€€€€€€¥˜€¡Ñ½Ñ…°€ø€À¤ì(€€€€€€€€€€€½ÁåAÉ½É•ÍÌ¹Í•Ñ%¹‘•Ñ•Éµ¥¹…Ñ”¡™…±Í”¤ì(€€€€€€€€€€€¥¹ĞÀ€ô€¡¥¹Ğ¤5…Ñ ¹µ¥¸ ÄÀÀÀ°½Á¥•€¨€ÄÀÀÁ0€¼Ñ½Ñ…°¤ì(€€€€€€€€€€€½ÁåAÉ½É•ÍÌ¹Í•ÑAÉ½É•ÍÌ¡À¤ì(€€€€€€€€€€€½ÁåMÑ…ÑÕÌ¹Í•ÑQ•áĞ ‰µÁ…½Ñ…¹‘¼UM	UÑ¥³Š˜€ˆ€¬€¡À€¼€ÄÀ¸À¤€¬€ˆ”ƒŠP€ˆ€¬™½Éµ…Ñ	åÑ•Ì¡½Á¥•¤€¬€ˆ€¼€ˆ€¬™½Éµ…Ñ	åÑ•Ì¡Ñ½Ñ…°¤€¬€ˆƒŠP€ˆ€¬Á…ÉÑQ•áĞ¤ì(€€€€€€€ô•±Í”ì(€€€€€€€€€€€½ÁåMÑ…ÑÕÌ¹Í•ÑQ•áĞ ‰µÁ…½Ñ…¹‘¼UM	UÑ¥³Š˜€ˆ€¬™½Éµ…Ñ	åÑ•Ì¡½Á¥•¤€¬€ˆƒŠP€ˆ€¬Á…ÉÑQ•áĞ¤ì(€€€€€€€ô(€€€ô((€€€ÁÉ¥Ù…Ñ”Ù½¥½Áå%Í¼¡UÉ¤ÕÉ¤°¥±”Ñ…É•Ğ°±½¹œÑ½Ñ…°¤ì(€€€€€€€½ÁåAÉ½É•ÍÌ¹Í•ÑY¥Í¥‰¥±¥Ñä¡Y¥•Ü¹Y%M%	1¤ì(€€€€€€€½ÁåAÉ½É•ÍÌ¹Í•Ñ%¹‘•Ñ•Éµ¥¹…Ñ”¡™…±Í”¤ì(€€€€€€€½ÁåAÉ½É•ÍÌ¹Í•ÑAÉ½É•ÍÌ À¤ì(€€€€€€€½ÁåMÑ…ÑÕÌ¹Í•ÑQ•áĞ ‰½Á¥…¹‘¼€ˆ€¬Ñ…É•Ğ¹•Ñ9…µ” ¤€¬€‹Š˜ˆ¤ì((€€€€€€€¥¼¹•á•ÕÑ”  ¤€´øì(€€€€€€€€€€€¥±”Á…ÉĞ€ô¹•Ü¥±”¡Ñ…É•Ğ¹•ÑA…É•¹Ñ¥±” ¤°€ˆ¸ˆ€¬Ñ…É•Ğ¹•Ñ9…µ” ¤€¬€ˆ¹Á…ÉĞˆ¤ì(€€€€€€€€€€€±½¹œ½Á¥•€ô€Àì(€€€€€€€€€€€ÑÉä€¡%¹ÁÕÑMÑÉ•…´¥¸€ô•Ñ½¹Ñ•¹ÑI•Í½±Ù•È ¤¹½Á•¹%¹ÁÕÑMÑÉ•…´¡ÕÉ¤¤ì(€€€€€€€€€€€€€€€€¥±•=ÕÑÁÕÑMÑÉ•…´½ÕĞ€ô¹•Ü¥±•=ÕÑÁÕÑMÑÉ•…´¡Á…ÉĞ¤¤ì(€€€€€€€€€€€€€€€¥˜€¡¥¸€ôô¹Õ±°¤Ñ¡É½Ü¹•Ü%±±•…±MÑ…Ñ•á•ÁÑ¥½¸ ‰;¼™½¤Á½ÍÏµÙ•°…‰É¥È„%M<ˆ¤ì(€€€€€€€€€€€€€€€‰åÑ•mt‰Õ˜€ô¹•Ü‰åÑ•lÄÀÈĞ€¨€ÄÀÈÑtì(€€€€€€€€€€€€€€€¥¹Ğ¸ì(€€€€€€€€€€€€€€€±½¹œ±…ÍÑU¤€ô€Àì(€€€€€€€€€€€€€€€İ¡¥±”€ ¡¸€ô¥¸¹É•…¡‰Õ˜¤¤€øô€À¤ì(€€€€€€€€€€€€€€€€€€€¥˜€¡¸€ôô€À¤½¹Ñ¥¹Õ”ì(€€€€€€€€€€€€€€€€€€€½ÕĞ¹İÉ¥Ñ”¡‰Õ˜°€À°¸¤ì(€€€€€€€€€€€€€€€€€€€½Á¥•€¬ô¸ì(€€€€€€€€€€€€€€€€€€€±½¹œ¹½Ü€ôMåÍÑ•´¹ÕÉÉ•¹ÑQ¥µ•5¥±±¥Ì ¤ì(€€€€€€€€€€€€€€€€€€€¥˜€¡¹½Ü€´±…ÍÑU¤€ø€ÈÔÀ¤ì(€€€€€€€€€€€€€€€€€€€€€€€±½¹œŒ€ô½Á¥•ì(€€€€€€€€€€€€€€€€€€€€€€€ÉÕ¹=¹U¥Q¡É•…  ¤€´øÕÁ‘…Ñ•½ÁåAÉ½É•ÍÌ¡Œ°Ñ½Ñ…°¤¤ì(€€€€€€€€€€€€€€€€€€€€€€€±…ÍÑU¤€ô¹½Üì(€€€€€€€€€€€€€€€€€€€ô(€€€€€€€€€€€€€€€ô(€€€€€€€€€€€€€€€½ÕĞ¹•Ñ ¤¹Íå¹Œ ¤ì(€€€€€€€€€€€€€€€¥˜€¡Ñ…É•Ğ¹•á¥ÍÑÌ ¤€˜˜€…Ñ…É•Ğ¹‘•±•Ñ” ¤¤Ñ¡É½Ü¹•Ü%±±•…±MÑ…Ñ•á•ÁÑ¥½¸ ‰;¼½¹Í•Õ¤ÍÕ‰ÍÑ¥ÑÕ¥È„%M<…¹Ñ¥„ˆ¤ì(€€€€€€€€€€€€€€€¥˜€ …Á…ÉĞ¹É•¹…µ•Q¼¡Ñ…É•Ğ¤¤Ñ¡É½Ü¹•Ü%±±•…±MÑ…Ñ•á•ÁÑ¥½¸ ‰;¼½¹Í•Õ¤™¥¹…±¥é…È¼…ÉÅÕ¥Ù¼ˆ¤ì(€€€€€€€€€€€€€€€ÉÕ¹=¹U¥Q¡É•…  ¤€´øì(€€€€€€€€€€€€€€€€€€€½ÁåAÉ½É•ÍÌ¹Í•ÑAÉ½É•ÍÌ ÄÀÀÀ¤ì(€€€€€€€€€€€€€€€€€€€½ÁåMÑ…ÑÕÌ¹Í•ÑQ•áĞ ‰½¹±×µ‘¼è€ˆ€¬Ñ…É•Ğ¹•Ñ9…µ” ¤¤ì(€€€€€€€€€€€€€€€€€€€É•™É•Í¡±° ¤ì(€€€€€€€€€€€€€€€ô¤ì(€€€€€€€€€€€ô…Ñ €¡á•ÁÑ¥½¸”¤ì(€€€€€€€€€€€€€€€Á…ÉĞ¹‘•±•Ñ” ¤ì(€€€€€€€€€€€€€€€MÑÉ¥¹œµÍœ€ô”¹•Ñ5•ÍÍ…” ¤€„ô¹Õ±°€ü”¹•Ñ5•ÍÍ…” ¤€è”¹Ñ½MÑÉ¥¹œ ¤ì(€€€€€€€€€€€€€€€ÉÕ¹=¹U¥Q¡É•…  ¤€´øì(€€€€€€€€€€€€€€€€€€€½ÁåMÑ…ÑÕÌ¹Í•ÑQ•áĞ ‰ÉÉ¼è€ˆ€¬µÍœ¤ì(€€€€€€€€€€€€€€€€€€€Q½…ÍĞ¹µ…­•Q•áĞ¡Ñ¡¥Ì°€‰…±¡„…¼½Á¥…È%M<ˆ°Q½…ÍĞ¹19Q!}1=9¤¹Í¡½Ü ¤ì(€€€€€€€€€€€€€€€ô¤ì(€€€€€€€€€€€ô(€€€€€€€ô¤ì(€€€ô((€€€ÁÉ¥Ù…Ñ”Ù½¥ÕÁ‘…Ñ•½ÁåAÉ½É•ÍÌ¡±½¹œ½Á¥•°±½¹œÑ½Ñ…°¤ì(€€€€€€€¥˜€¡Ñ½Ñ…°€ø€À¤ì(€€€€€€€€€€€¥¹ĞÀ€ô€¡¥¹Ğ¤5…Ñ ¹µ¥¸ ÄÀÀÀ°½Á¥•€¨€ÄÀÀÁ0€¼Ñ½Ñ…°¤ì(€€€€€€€€€€€½ÁåAÉ½É•ÍÌ¹Í•ÑAÉ½É•ÍÌ¡À¤ì(€€€€€€€€€€€½ÁåMÑ…ÑÕÌ¹Í•ÑQ•áĞ ‰½Á¥…¹‘¿Š˜€ˆ€¬€¡À€¼€ÄÀ¸À¤€¬€ˆ”ƒŠP€ˆ€¬™½Éµ…Ñ	åÑ•Ì¡½Á¥•¤€¬€ˆ€¼€ˆ€¬™½Éµ…Ñ	åÑ•Ì¡Ñ½Ñ…°¤¤ì(€€€€€€€ô•±Í”ì(€€€€€€€€€€€½ÁåMÑ…ÑÕÌ¹Í•ÑQ•áĞ ‰½Á¥…¹‘¿Š˜€ˆ€¬™½Éµ…Ñ	åÑ•Ì¡½Á¥•¤¤ì(€€€€€€€ô(€€€ô((€€€ÁÉ¥Ù…Ñ”Ù½¥É•™É•Í¡±° ¤ì(€€€€€€€É•™É•Í¡M•ÉÙ•ÉMÑ…ÑÕÌ ¤ì(€€€€€€€¥±”É½½Ğ€ôMÑ½É…•A…Ñ¡Ì¹É½½Ğ¡Ñ¡¥Ì¤ì(€€€€€€€ÍÑ½É…•A…Ñ ¹Í•ÑQ•áĞ ‰I…¥è½µÁ…ÉÑ¥±¡…‘„è€ˆ€¬É½½Ğ¹•Ñ‰Í½±ÕÑ•A…Ñ  ¤¤ì((€€€€€€€¥˜€ …¡…ÍM•±•Ñ•‘MÑ½É…••ÍÌ ¤¤ì(€€€€€€€€€€€ÍÑ½É…•%¹™¼¹Í•ÑQ•áĞ ‰•ÍÍ¼…¼…Éµ…é•¹…µ•¹Ñ¼Á•¹‘•¹Ñ”¸Q½ÅÕ”•´ƒŠqM•±•¥½¹…È…Éµ…é•¹…µ•¹Ñ¼€¼Á•¹‘É¥Ù—Št½Ô¥¹¥¥”¼Í•ÉÙ¥‘½ÈÁ…É„½¹•‘•È…•ÍÍ¼¸ˆ¤ì(€€€€€€€€€€€ÍÑ½É…•UÍ…”¹Í•ÑAÉ½É•ÍÌ À¤ì(€€€€€€€€€€€…µ•Í½¹Ñ…¥¹•È¹É•µ½Ù•±±Y¥•İÌ ¤ì(€€€€€€€€€€€…µ•Í½¹Ñ…¥¹•È¹…‘‘Y¥•Ü¡Ñ•áĞ ‰M•´…•ÍÍ¼…¼…Éµ…é•¹…µ•¹Ñ¼Í•±•¥½¹…‘¼¸ˆ°€ÄÔ°½±½È¹1QId¤¤ì(€€€€€€€€€€€É•ÑÕÉ¸ì(€€€€€€€ô((€€€€€€€MÑ½É…•A…Ñ¡Ì¹•ÍÍI•ÍÕ±Ğ…•ÍÌ€ôMÑ½É…•A…Ñ¡Ì¹Ù…±¥‘…Ñ”¡Ñ¡¥Ì°™…±Í”¤ì(€€€€€€€¥˜€ ……•ÍÌ¹½¬¤ì(€€€€€€€€€€€ÍÑ½É…•%¹™¼¹Í•ÑQ•áĞ ‰%9%MA=;5Y0ƒŠP€ˆ€¬…•ÍÌ¹µ•ÍÍ…”€¬(€€€€€€€€€€€€€€€€€€€€‰q¹I•½¹•Ñ”¼Á•¹‘É¥Ù””Í•±•¥½¹”¼…Éµ…é•¹…µ•¹Ñ¼¹½Ù…µ•¹Ñ”¸ˆ¤ì(€€€€€€€€€€€ÍÑ½É…•UÍ…”¹Í•ÑAÉ½É•ÍÌ À¤ì(€€€€€€€€€€€…µ•Í½¹Ñ…¥¹•È¹É•µ½Ù•±±Y¥•İÌ ¤ì(€€€€€€€€€€€…µ•Í½¹Ñ…¥¹•È¹…‘‘Y¥•Ü¡Ñ•áĞ ‰Éµ…é•¹…µ•¹Ñ¼¥¹‘¥ÍÁ½»µÙ•°¸ˆ°€ÄÔ°½±½È¹1QId¤¤ì(€€€€€€€€€€€É•ÑÕÉ¸ì(€€€€€€€ô((€€€€€€€MÑ½É…•A…Ñ¡Ì¹•¹ÍÕÉ”¡Ñ¡¥Ì¤ì(€€€€€€€É½½Ğ€ô…•ÍÌ¹É½½Ğì(€€€€€€€±½¹œ™É•”€ô…•ÍÌ¹™É••	åÑ•Ìì(€€€€€€€±½¹œÑ½Ñ…°€ô…•ÍÌ¹Ñ½Ñ…±	åÑ•Ìì(€€€€€€€1¥ÍĞñ…µ•¹ÑÉäø…µ•Ì€ôÍ…¹…µ•Ì ¤ì(€€€€€€€±½¹œ±¥‰É…Éå	åÑ•Ì€ô€Àì(€€€€€€€™½È€¡…µ•¹ÑÉä…µ”€è…µ•Ì¤¥˜€¡…µ”¹‰åÑ•Ì€ø€À¤±¥‰É…Éå	åÑ•Ì€¬ô…µ”¹‰åÑ•Ìì(€€€€€€€±½¹œÕÍ•€ôÑ½Ñ…°€ø€À€ü5…Ñ ¹µ…à À°Ñ½Ñ…°€´™É•”¤€è€Àì(€€€€€€€¥¹ĞÕÍ•‘A•Éµ¥±±”€ôÑ½Ñ…°€ø€À€ü€¡¥¹Ğ¤5…Ñ ¹µ¥¸ ÄÀÀÀ°ÕÍ•€¨€ÄÀÀÁ0€¼Ñ½Ñ…°¤€è€Àì(€€€€€€€ÍÑ½É…•UÍ…”¹Í•ÑAÉ½É•ÍÌ¡ÕÍ•‘A•Éµ¥±±”¤ì((€€€€€€€¥¹ĞÕÍ‰UÑ¥±½Õ¹Ğ€ô€Àì(€€€€€€€™½È€¡…µ•¹ÑÉä…µ”€è…µ•Ì¤¥˜€¡…µ”¹ÕÍ‰UÑ¥°€„ô¹Õ±°¤ÕÍ‰UÑ¥±½Õ¹Ğ¬¬ì(€€€€€€€MÑÉ¥¹œÕÍ•‘AĞ€ôÑ½Ñ…°€ø€À€ü¹•Ü•¥µ…±½Éµ…Ğ ˆÀ¸Àˆ¤¹™½Éµ…Ğ¡ÕÍ•‘A•Éµ¥±±”€¼€ÄÀ¸À¤€¬€ˆ”ÕÍ…‘¼ˆ€è€‰½ÕÁ‡Ÿ¼¥¹‘¥ÍÁ½»µÙ•°ˆì(€€€€€€€ÍÑ½É…•%¹™¼¹Í•ÑQ•áĞ (€€€€€€€€€€€€€€€™½Éµ…Ñ	åÑ•Ì¡™É•”¤€¬€ˆ±¥ÙÉ•Ì‘”€ˆ€¬™½Éµ…Ñ	åÑ•Ì¡Ñ½Ñ…°¤€¬€ˆƒŠˆ€ˆ€¬ÕÍ•‘AĞ€¬(€€€€€€€€€€€€€€€€‰q¹	¥‰±¥½Ñ•„=A0è€ˆ€¬…µ•Ì¹Í¥é” ¤€¬€ˆ©½¼¡Ì¤ƒŠˆ€ˆ€¬™½Éµ…Ñ	åÑ•Ì¡±¥‰É…Éå	åÑ•Ì¤€¬(€€€€€€€€€€€€€€€€¡ÕÍ‰UÑ¥±½Õ¹Ğ€ø€À€ü€ˆƒŠˆ€ˆ€¬ÕÍ‰UÑ¥±½Õ¹Ğ€¬€ˆUM	UÑ¥°ˆ€è€ˆˆ¤¤ì(€€€€€€€É•¹‘•É…µ•Ì¡…µ•Ì¤ì(€€€ô((€€€ÁÉ¥Ù…Ñ”Ù½¥É•™É•Í¡…µ•Ì ¤ì(€€€€€€€¥˜€ …¡…ÍM•±•Ñ•‘MÑ½É…••ÍÌ ¤¤É•ÑÕÉ¸ì(€€€€€€€É•¹‘•É…µ•Ì¡Í…¹…µ•Ì ¤¤ì(€€€ô((€€€ÁÉ¥Ù…Ñ”1¥ÍĞñ…µ•¹ÑÉäøÍ…¹…µ•Ì ¤ì(€€€€€€€1¥ÍĞñ…µ•¹ÑÉäø…µ•Ì€ô¹•ÜÉÉ…å1¥ÍĞğø ¤ì(€€€€€€€½±±•Ñ%Í¼¡…µ•Ì°€‰%M<Yˆ°MÑ½É…•A…Ñ¡Ì¹‘Ù¡Ñ¡¥Ì¤¤ì(€€€€€€€½±±•Ñ%Í¼¡…µ•Ì°€‰%M<ˆ°MÑ½É…•A…Ñ¡Ì¹¡Ñ¡¥Ì¤¤ì(€€€€€€€™½È€¡UÍ‰UÑ¥±…µ•Ì¹…µ”…µ”€èUÍ‰UÑ¥±…µ•Ì¹É•…¡MÑ½É…•A…Ñ¡Ì¹É½½Ğ¡Ñ¡¥Ì¤¤¤ì(€€€€€€€€€€€MÑÉ¥¹œ‘•Ñ…¥±Ì€ô€‰UM	UÑ¥°€ˆ€¬…µ”¹µ•‘¥…9…µ” ¤€¬€ˆƒŠˆ€ˆ€¬…µ”¹Á…ÉÑÌ€¬€ˆÁ…ÉÑ”ˆ€¬€¡…µ”¹Á…ÉÑÌ€ôô€Ä€ü€ˆˆ€è€‰Ìˆ¤ì(€€€€€€€€€€€¥˜€¡…µ”¹‰åÑ•Ì€øô€À¤‘•Ñ…¥±Ì€¬ô€ˆƒŠˆ€ˆ€¬™½Éµ…Ñ	åÑ•Ì¡…µ”¹‰åÑ•Ì¤ì(€€€€€€€€€€€¥˜€ ……µ”¹…µ•%¹¥Í	±…¹¬ ¤¤‘•Ñ…¥±Ì€¬ô€‰q¸ˆ€¬…µ”¹…µ•%ì(€€€€€€€€€€€…µ•Ì¹…‘¡…µ•¹ÑÉä¹ÕÍ‰UÑ¥°¡…µ”°‘•Ñ…¥±Ì¤¤ì(€€€€€€€ô(€€€€€€€…µ•Ì¹Í½ÉĞ¡½µÁ…É…Ñ½È¹½µÁ…É¥¹œ¡œ€´øœ¹Ñ¥Ñ±”¹Ñ½1½İ•É…Í” ¤¤¤ì(€€€€€€€É•ÑÕÉ¸…µ•Ìì(€€€ô((€€€ÁÉ¥Ù…Ñ”Ù½¥É•¹‘•É…µ•Ì¡1¥ÍĞñ…µ•¹ÑÉäø…µ•Ì¤ì(€€€€€€€…µ•Í½¹Ñ…¥¹•È¹É•µ½Ù•±±Y¥•İÌ ¤ì(€€€€€€€¥˜€¡…µ•Ì¹¥ÍµÁÑä ¤¤ì(€€€€€€€€€€€Q•áÑY¥•Ü•µÁÑä€ôÑ•áĞ ‰9•¹¡Õµ„%M<½Ô•¹ÑÉ…‘„UM	UÑ¥°•¹½¹ÑÉ…‘„¸ˆ°€ÄÔ°½±½È¹1QId¤ì(€€€€€€€€€€€•µÁÑä¹Í•ÑA…‘‘¥¹œ À°‘À ÄÈ¤°€À°€À¤ì(€€€€€€€€€€€…µ•Í½¹Ñ…¥¹•È¹…‘‘Y¥•Ü¡•µÁÑä¤ì(€€€€€€€€€€€É•ÑÕÉ¸ì(€€€€€€€ô((€€€€€€€™½È€¡…µ•¹ÑÉä…µ”€è…µ•Ì¤ì(€€€€€€€€€€€1¥¹•…É1…å½ÕĞÉ½Ü€ô¹•Ü1¥¹•…É1…å½ÕĞ¡Ñ¡¥Ì¤ì(€€€€€€€€€€€É½Ü¹Í•Ñ=É¥•¹Ñ…Ñ¥½¸¡1¥¹•…É1…å½ÕĞ¹!=I%i=9Q0¤ì(€€€€€€€€€€€É½Ü¹Í•ÑÉ…Ù¥Ñä¡É…Ù¥Ñä¹9QI}YIQ%0¤ì(€€€€€€€€€€€É½Ü¹Í•ÑA…‘‘¥¹œ À°‘À à¤°€À°‘À à¤¤ì((€€€€€€€€€€€Q•áÑY¥•Ü¥¹™¼€ôÑ•áĞ¡…µ”¹Ñ¥Ñ±”€¬€‰q¸ˆ€¬…µ”¹‘•Ñ…¥±Ì°€ÄÔ°½±½È¹]!%Q¤ì(€€€€€€€€€€€É½Ü¹…‘‘Y¥•Ü¡¥¹™¼°İ•¥¡ÑA…É…µÌ ¤¤ì((€€€€€€€€€€€	ÕÑÑ½¸µ…¹…”€ô‰ÕÑÑ½¸ ‰•Í¥¹ÍÑ…±…Èˆ¤ì(€€€€€€€€€€€µ…¹…”¹Í•Ñ=¹±¥­1¥ÍÑ•¹•È¡Ø€´ø½¹™¥Éµ•±•Ñ”¡…µ”¤¤ì(€€€€€€€€€€€É½Ü¹…‘‘Y¥•Ü¡µ…¹…”°¹•Ü1¥¹•…É1…å½ÕĞ¹1…å½ÕÑA…É…µÌ¡‘À ÄÄà¤°‘À Ğà¤¤¤ì(€€€€€€€€€€€…µ•Í½¹Ñ…¥¹•È¹…‘‘Y¥•Ü¡É½Ü°µ…Ñ¡]É…À ¤¤ì(€€€€€€€ô(€€€ô((€€€ÁÉ¥Ù…Ñ”Ù½¥½¹™¥Éµ•±•Ñ”¡…µ•¹ÑÉä…µ”¤ì(€€€€€€€MÑÉ¥¹œÍ¥é•Q•áĞ€ô…µ”¹‰åÑ•Ì€øô€À€ü™½Éµ…Ñ	åÑ•Ì¡…µ”¹‰åÑ•Ì¤€è€‰Ñ…µ…¹¡¼‘•Í½¹¡•¥‘¼ˆì(€€€€€€€MÑÉ¥¹œ­¥¹€ô…µ”¹ÕÍ‰UÑ¥°€„ô¹Õ±°€ü€‰UM	UÑ¥°ˆ€è€‰%M<ˆì(€€€€€€€MÑÉ¥¹œµ•ÍÍ…”€ô€‰•Í¥¹ÍÑ…±…È€ˆ€¬…µ”¹Ñ¥Ñ±”€¬€ˆıq¹q¹½Éµ…Ñ¼è€ˆ€¬­¥¹€¬(€€€€€€€€€€€€€€€€‰q¹ÍÁ‡¼„±¥‰•É…Èè€ˆ€¬Í¥é•Q•áĞ€¬(€€€€€€€€€€€€€€€€¡…µ”¹ÕÍ‰UÑ¥°€„ô¹Õ±°€ü€‰q¹<É•¥ÍÑÉ¼½ÉÉ•ÍÁ½¹‘•¹Ñ”Ñ…µ‹¥´Í•Ë„É•µ½Ù¥‘¼‘¼Õ°¹™œ¸ˆ€è€ˆˆ¤ì(€€€€€€€¹•Ü±•ÉÑ¥…±½œ¹	Õ¥±‘•È¡Ñ¡¥Ì¤(€€€€€€€€€€€€€€€€¹Í•ÑQ¥Ñ±” ‰•Í¥¹ÍÑ…±…È©½¼ˆ¤(€€€€€€€€€€€€€€€€¹Í•Ñ5•ÍÍ…”¡µ•ÍÍ…”¤(€€€€€€€€€€€€€€€€¹Í•Ñ9•…Ñ¥Ù•	ÕÑÑ½¸ ‰…¹•±…Èˆ°¹Õ±°¤(€€€€€€€€€€€€€€€€¹Í•ÑA½Í¥Ñ¥Ù•	ÕÑÑ½¸ ‰•Í¥¹ÍÑ…±…Èˆ°€¡°Ü¤€´øÕ¹¥¹ÍÑ…±±…µ”¡…µ”¤¤(€€€€€€€€€€€€€€€€¹Í¡½Ü ¤ì(€€€ô((€€€ÁÉ¥Ù…Ñ”Ù½¥Õ¹¥¹ÍÑ…±±…µ”¡…µ•¹ÑÉä…µ”¤ì(€€€€€€€½ÁåAÉ½É•ÍÌ¹Í•ÑY¥Í¥‰¥±¥Ñä¡Y¥•Ü¹Y%M%	1¤ì(€€€€€€€½ÁåAÉ½É•ÍÌ¹Í•Ñ%¹‘•Ñ•Éµ¥¹…Ñ”¡ÑÉÕ”¤ì(€€€€€€€½ÁåMÑ…ÑÕÌ¹Í•ÑQ•áĞ ‰•Í¥¹ÍÑ…±…¹‘¼€ˆ€¬…µ”¹Ñ¥Ñ±”€¬€‹Š˜ˆ¤ì(€€€€€€€¥¼¹•á•ÕÑ”  ¤€´øì(€€€€€€€€€€€ÑÉäì(€€€€€€€€€€€€€€€¥˜€¡…µ”¹ÕÍ‰UÑ¥°€„ô¹Õ±°¤ì(€€€€€€€€€€€€€€€€€€€UÍ‰UÑ¥±5…¹…•È¹I•µ½Ù•I•ÍÕ±ĞÉ•ÍÕ±Ğ€ôUÍ‰UÑ¥±5…¹…•È¹Õ¹¥¹ÍÑ…±°¡MÑ½É…•A…Ñ¡Ì¹É½½Ğ¡Ñ¡¥Ì¤°…µ”¹ÕÍ‰UÑ¥°¤ì(€€€€€€€€€€€€€€€€€€€ÉÕ¹=¹U¥Q¡É•…  ¤€´øì(€€€€€€€€€€€€€€€€€€€€€€€½ÁåAÉ½É•ÍÌ¹Í•Ñ%¹‘•Ñ•Éµ¥¹…Ñ”¡™…±Í”¤ì(€€€€€€€€€€€€€€€€€€€€€€€½ÁåAÉ½É•ÍÌ¹Í•ÑAÉ½É•ÍÌ ÄÀÀÀ¤ì(€€€€€€€€€€€€€€€€€€€€€€€MÑÉ¥¹œµÍœ€ô€‰•Í¥¹ÍÑ…±…‘¼è€ˆ€¬É•ÍÕ±Ğ¹Ñ¥Ñ±”€¬€ˆƒŠˆ€ˆ€¬™½Éµ…Ñ	åÑ•Ì¡É•ÍÕ±Ğ¹‰åÑ•Ì¤€¬€ˆ±¥‰•É…‘½Ìˆì(€€€€€€€€€€€€€€€€€€€€€€€¥˜€¡É•ÍÕ±Ğ¹¡…Í1•™Ñ½Ù•ÉÌ ¤¤µÍœ€¬ô€ˆƒŠˆ…Ñ•»Ÿ¼èÍ½‰É½Ô€ˆ€¬€¡É•ÍÕ±Ğ¹Á…ÉÑÍ½Õ¹€´É•ÍÕ±Ğ¹Á…ÉÑÍ•±•Ñ•¤€¬€ˆ…ÉÅÕ¥Ù¼Ñ•µÁ½Ë…É¥¼ˆì(€€€€€€€€€€€€€€€€€€€€€€€½ÁåMÑ…ÑÕÌ¹Í•ÑQ•áĞ¡µÍœ¤ì(€€€€€€€€€€€€€€€€€€€€€€€Q½…ÍĞ¹µ…­•Q•áĞ¡Ñ¡¥Ì°É•ÍÕ±Ğ¹¡…Í1•™Ñ½Ù•ÉÌ ¤€ü€‰)½¼É•µ½Ù¥‘¼‘¼=A0ìÙ•É¥™¥ÅÕ”…ÉÅÕ¥Ù½ÌÑ•µÁ½Ë…É¥½Ìˆ€è€‰)½¼‘•Í¥¹ÍÑ…±…‘¼ˆ°Q½…ÍĞ¹19Q!}1=9¤¹Í¡½Ü ¤ì(€€€€€€€€€€€€€€€€€€€€€€€É•™É•Í¡±° ¤ì(€€€€€€€€€€€€€€€€€€€ô¤ì(€€€€€€€€€€€€€€€ô•±Í”ì(€€€€€€€€€€€€€€€€€€€¥˜€¡…µ”¹™¥±”€ôô¹Õ±°ñğ€……µ”¹™¥±”¹¥Í¥±” ¤¤Ñ¡É½Ü¹•Ü%±±•…±MÑ…Ñ•á•ÁÑ¥½¸ ‰%M<»¼•¹½¹ÑÉ…‘„ˆ¤ì(€€€€€€€€€€€€€€€€€€€¥˜€ ……µ”¹™¥±”¹‘•±•Ñ” ¤¤Ñ¡É½Ü¹•Ü%±±•…±MÑ…Ñ•á•ÁÑ¥½¸ ‰;¼½¹Í•Õ¤•á±Õ¥È„%M<ˆ¤ì(€€€€€€€€€€€€€€€€€€€ÉÕ¹=¹U¥Q¡É•…  ¤€´øì(€€€€€€€€€€€€€€€€€€€€€€€½ÁåAÉ½É•ÍÌ¹Í•Ñ%¹‘•Ñ•Éµ¥¹…Ñ”¡™…±Í”¤ì(€€€€€€€€€€€€€€€€€€€€€€€½ÁåAÉ½É•ÍÌ¹Í•ÑAÉ½É•ÍÌ ÄÀÀÀ¤ì(€€€€€€€€€€€€€€€€€€€€€€€½ÁåMÑ…ÑÕÌ¹Í•ÑQ•áĞ ‰•Í¥¹ÍÑ…±…‘¼è€ˆ€¬…µ”¹Ñ¥Ñ±”€¬€ˆƒŠˆ€ˆ€¬™½Éµ…Ñ	åÑ•Ì¡…µ”¹‰åÑ•Ì¤€¬€ˆ±¥‰•É…‘½Ìˆ¤ì(€€€€€€€€€€€€€€€€€€€€€€€Q½…ÍĞ¹µ…­•Q•áĞ¡Ñ¡¥Ì°€‰)½¼‘•Í¥¹ÍÑ…±…‘¼ˆ°Q½…ÍĞ¹19Q!}M!=IP¤¹Í¡½Ü ¤ì(€€€€€€€€€€€€€€€€€€€€€€€É•™É•Í¡±° ¤ì(€€€€€€€€€€€€€€€€€€€ô¤ì(€€€€€€€€€€€€€€€ô(€€€€€€€€€€€ô…Ñ €¡á•ÁÑ¥½¸”¤ì(€€€€€€€€€€€€€€€MÑÉ¥¹œµÍœ€ô”¹•Ñ5•ÍÍ…” ¤€„ô¹Õ±°€ü”¹•Ñ5•ÍÍ…” ¤€è”¹Ñ½MÑÉ¥¹œ ¤ì(€€€€€€€€€€€€€€€ÉÕ¹=¹U¥Q¡É•…  ¤€´øì(€€€€€€€€€€€€€€€€€€€½ÁåAÉ½É•ÍÌ¹Í•Ñ%¹‘•Ñ•Éµ¥¹…Ñ”¡™…±Í”¤ì(€€€€€€€€€€€€€€€€€€€½ÁåMÑ…ÑÕÌ¹Í•ÑQ•áĞ ‰ÉÉ¼…¼‘•Í¥¹ÍÑ…±…Èè€ˆ€¬µÍœ¤ì(€€€€€€€€€€€€€€€€€€€Q½…ÍĞ¹µ…­•Q•áĞ¡Ñ¡¥Ì°µÍœ°Q½…ÍĞ¹19Q!}1=9¤¹Í¡½Ü ¤ì(€€€€€€€€€€€€€€€€€€€É•™É•Í¡±° ¤ì(€€€€€€€€€€€€€€€ô¤ì(€€€€€€€€€€€ô(€€€€€€€ô¤ì(€€€ô((€€€ÁÉ¥Ù…Ñ”ÍÑ…Ñ¥ŒÙ½¥½±±•Ñ%Í¼¡1¥ÍĞñ…µ•¹ÑÉäø½ÕĞ°MÑÉ¥¹œ­¥¹°¥±”‘¥È¤ì(€€€€€€€¥±•mt™¥±•Ìì(€€€€€€€ÑÉäì(€€€€€€€€€€€™¥±•Ì€ô‘¥È¹±¥ÍÑ¥±•Ì ¡°¹…µ”¤€´ø¹…µ”¹Ñ½1½İ•É…Í” ¤¹•¹‘Í]¥Ñ  ˆ¹¥Í¼ˆ¤¤ì(€€€€€€€ô…Ñ €¡M•ÕÉ¥Ñåá•ÁÑ¥½¸”¤ì(€€€€€€€€€€€É•ÑÕÉ¸ì(€€€€€€€ô(€€€€€€€¥˜€¡™¥±•Ì€ôô¹Õ±°¤É•ÑÕÉ¸ì(€€€€€€€ÉÉ…åÌ¹Í½ÉĞ¡™¥±•Ì°½µÁ…É…Ñ½È¹½µÁ…É¥¹œ¡¥±”èé•Ñ9…µ”¤¤ì(€€€€€€€™½È€¡¥±”˜€è™¥±•Ì¤ì(€€€€€€€€€€€¥˜€¡˜¹¥Í¥±” ¤¤½ÕĞ¹…‘¡…µ•¹ÑÉä¹¥Í¼¡˜°­¥¹€¬€ˆƒŠˆ€ˆ€¬™½Éµ…Ñ	åÑ•Ì¡˜¹±•¹Ñ  ¤¤¤¤ì(€€€€€€€ô(€€€ô((€€€ÁÉ¥Ù…Ñ”¥±•5•Ñ„ÅÕ•Éå5•Ñ„¡UÉ¤ÕÉ¤¤ì(€€€€€€€MÑÉ¥¹œ¹…µ”€ô¹Õ±°ì(€€€€€€€±½¹œÍ¥é”€ô€´Äì(€€€€€€€½¹Ñ•¹ÑI•Í½±Ù•ÈÉ•Í½±Ù•È€ô•Ñ½¹Ñ•¹ÑI•Í½±Ù•È ¤ì(€€€€€€€ÑÉä€¡ÕÉÍ½ÈŒ€ôÉ•Í½±Ù•È¹ÅÕ•Éä¡ÕÉ¤°¹•ÜMÑÉ¥¹muí=Á•¹…‰±•½±Õµ¹Ì¹%MA1e}95°=Á•¹…‰±•½±Õµ¹Ì¹M%iô°¹Õ±°°¹Õ±°°¹Õ±°¤¤ì(€€€€€€€€€€€¥˜€¡Œ€„ô¹Õ±°€˜˜Œ¹µ½Ù•Q½¥ÉÍĞ ¤¤ì(€€€€€€€€€€€€€€€¥¹Ğ¹¤€ôŒ¹•Ñ½±Õµ¹%¹‘•à¡=Á•¹…‰±•½±Õµ¹Ì¹%MA1e}95¤ì(€€€€€€€€€€€€€€€¥¹ĞÍ¤€ôŒ¹•Ñ½±Õµ¹%¹‘•à¡=Á•¹…‰±•½±Õµ¹Ì¹M%i¤ì(€€€€€€€€€€€€€€€¥˜€¡¹¤€øô€À¤¹…µ”€ôŒ¹•ÑMÑÉ¥¹œ¡¹¤¤ì(€€€€€€€€€€€€€€€¥˜€¡Í¤€øô€À€˜˜€…Œ¹¥Í9Õ±°¡Í¤¤¤Í¥é”€ôŒ¹•Ñ1½¹œ¡Í¤¤ì(€€€€€€€€€€€ô(€€€€€€€ô(€€€€€€€É•ÑÕÉ¸¹•Ü¥±•5•Ñ„¡¹…µ”°Í¥é”¤ì(€€€ô((€€€ÁÉ¥Ù…Ñ”ÍÑ…Ñ¥ŒMÑÉ¥¹œÍ…™•9…µ”¡MÑÉ¥¹œ¹…µ”¤ì(€€€€€€€É•ÑÕÉ¸¹…µ”¹É•Á±…” œ¼œ°€|œ¤¹É•Á±…” qpœ°€|œ¤¹É•Á±…” pÀœ°€|œ¤¹ÑÉ¥´ ¤ì(€€€ô((€€€ÁÉ¥Ù…Ñ”Ù½¥É•ÅÕ•ÍÑ9½Ñ¥™¥…Ñ¥½¹A•Éµ¥ÍÍ¥½¹%™9••‘• ¤ì(€€€€€€€¥˜€¡	Õ¥±¹YIM%=8¹M-}%9P€øô€ÌÌ€˜˜¡•­M•±™A•Éµ¥ÍÍ¥½¸¡5…¹¥™•ÍĞ¹Á•Éµ¥ÍÍ¥½¸¹A=MQ}9=Q%%Q%=9L¤€„ôA…­…•5…¹…•È¹AI5%MM%=9}I9Q¤ì(€€€€€€€€€€€É•ÅÕ•ÍÑA•Éµ¥ÍÍ¥½¹Ì¡¹•ÜMÑÉ¥¹muí5…¹¥™•ÍĞ¹Á•Éµ¥ÍÍ¥½¸¹A=MQ}9=Q%%Q%=9Mô°IEUMQ}9=Q%%Q%=9L¤ì(€€€€€€€ô(€€€ô((€€€ÁÉ¥Ù…Ñ”Q•áÑY¥•ÜÍ•Ñ¥½¹Q¥Ñ±”¡MÑÉ¥¹œÙ…±Õ”¤ì(€€€€€€€Q•áÑY¥•ÜØ€ôÑ•áĞ¡Ù…±Õ”°€ÈÀ°½±½È¹]!%Q¤ì(€€€€€€€Ø¹Í•ÑQåÁ•™…”¡¹Õ±°°€Ä¤ì(€€€€€€€Ø¹Í•ÑA…‘‘¥¹œ À°‘À à¤°€À°‘À ÄÀ¤¤ì(€€€€€€€É•ÑÕÉ¸Øì(€€€ô((€€€ÁÉ¥Ù…Ñ”Q•áÑY¥•ÜÑ•áĞ¡MÑÉ¥¹œÙ…±Õ”°¥¹ĞÍÀ°¥¹Ğ½±½È¤ì(€€€€€€€Q•áÑY¥•ÜØ€ô¹•ÜQ•áÑY¥•Ü¡Ñ¡¥Ì¤ì(€€€€€€€Ø¹Í•ÑQ•áĞ¡Ù…±Õ”¤ì(€€€€€€€Ø¹Í•ÑQ•áÑM¥é”¡ÍÀ¤ì(€€€€€€€Ø¹Í•ÑQ•áÑ½±½È¡½±½È¤ì(€€€€€€€É•ÑÕÉ¸Øì(€€€ô((€€€ÁÉ¥Ù…Ñ”	ÕÑÑ½¸‰ÕÑÑ½¸¡MÑÉ¥¹œ±…‰•°¤ì(€€€€€€€	ÕÑÑ½¸ˆ€ô¹•Ü	ÕÑÑ½¸¡Ñ¡¥Ì¤ì(€€€€€€€ˆ¹Í•ÑQ•áĞ¡±…‰•°¤ì(€€€€€€€ˆ¹Í•Ñ±±…ÁÌ¡™…±Í”¤ì(€€€€€€€É•ÑÕÉ¸ˆì(€€€ô((€€€ÁÉ¥Ù…Ñ”1¥¹•…É1…å½ÕĞ¹1…å½ÕÑA…É…µÌµ…Ñ¡]É…À ¤ì(€€€€€€€É•ÑÕÉ¸¹•Ü1¥¹•…É1…å½ÕĞ¹1…å½ÕÑA…É…µÌ¡1¥¹•…É1…å½ÕĞ¹1…å½ÕÑA…É…µÌ¹5Q!}AI9P°1¥¹•…É1…å½ÕĞ¹1…å½ÕÑA…É…µÌ¹]IA}=9Q9P¤ì(€€€ô((€€€ÁÉ¥Ù…Ñ”1¥¹•…É1…å½ÕĞ¹1…å½ÕÑA…É…µÌİ•¥¡ÑA…É…µÌ ¤ì(€€€€€€€1¥¹•…É1…å½ÕĞ¹1…å½ÕÑA…É…µÌÀ€ô¹•Ü1¥¹•…É1…å½ÕĞ¹1…å½ÕÑA…É…µÌ À°1¥¹•…É1…å½ÕĞ¹1…å½ÕÑA…É…µÌ¹]IA}=9Q9P°€Å˜¤ì(€€€€€€€À¹Í•Ñ5…É¥¹Ì¡‘À Ì¤°€À°‘À Ì¤°€À¤ì(€€€€€€€É•ÑÕÉ¸Àì(€€€ô((€€€ÁÉ¥Ù…Ñ”¥¹Ğ‘À¡¥¹ĞÙ…±Õ”¤ì(€€€€€€€É•ÑÕÉ¸5…Ñ ¹É½Õ¹¡Ù…±Õ”€¨•ÑI•Í½ÕÉ•Ì ¤¹•Ñ¥ÍÁ±…å5•ÑÉ¥Ì ¤¹‘•¹Í¥Ñä¤ì(€€€ô((€€€ÁÉ¥Ù…Ñ”ÍÑ…Ñ¥ŒMÑÉ¥¹œ™½Éµ…Ñ	åÑ•Ì¡±½¹œ‰åÑ•Ì¤ì(€€€€€€€¥˜€¡‰åÑ•Ì€ğ€À¤É•ÑÕÉ¸€ˆüˆì(€€€€€€€MÑÉ¥¹mtÕ¹¥ÑÌ€ôì‰ˆ°€‰-ˆ°€‰5ˆ°€‰ˆ°€‰Q‰ôì(€€€€€€€‘½Õ‰±”¸€ô‰åÑ•Ìì(€€€€€€€¥¹Ğ¤€ô€Àì(€€€€€€€İ¡¥±”€¡¸€øô€ÄÀÈĞ€˜˜¤€ğÕ¹¥ÑÌ¹±•¹Ñ €´€Ä¤ì¸€¼ô€ÄÀÈĞì¤¬¬ìô(€€€€€€€É•ÑÕÉ¸¹•Ü•¥µ…±½Éµ…Ğ¡¤€ôô€À€ü€ˆÀˆ€è€ˆÀ¸ÀÀˆ¤¹™½Éµ…Ğ¡¸¤€¬€ˆ€ˆ€¬Õ¹¥ÑÍm¥tì(€€€ô((€€€ÁÉ¥Ù…Ñ”ÍÑ…Ñ¥Œ™¥¹…°±…ÍÌ¥±•5•Ñ„ì(€€€€€€€™¥¹…°MÑÉ¥¹œ¹…µ”ì(€€€€€€€™¥¹…°±½¹œÍ¥é”ì(€€€€€€€¥±•5•Ñ„¡MÑÉ¥¹œ¹…µ”°±½¹œÍ¥é”¤ìÑ¡¥Ì¹¹…µ”€ô¹…µ”ìÑ¡¥Ì¹Í¥é”€ôÍ¥é”ìô(€€€ô((€€€ÁÉ¥Ù…Ñ”ÍÑ…Ñ¥Œ™¥¹…°±…ÍÌ…µ•¹ÑÉäì(€€€€€€€™¥¹…°MÑÉ¥¹œÑ¥Ñ±”ì(€€€€€€€™¥¹…°MÑÉ¥¹œ‘•Ñ…¥±Ìì(€€€€€€€™¥¹…°¥±”™¥±”ì(€€€€€€€™¥¹…°UÍ‰UÑ¥±…µ•Ì¹…µ”ÕÍ‰UÑ¥°ì(€€€€€€€™¥¹…°±½¹œ‰åÑ•Ìì((€€€€€€€ÁÉ¥Ù…Ñ”…µ•¹ÑÉä¡MÑÉ¥¹œÑ¥Ñ±”°MÑÉ¥¹œ‘•Ñ…¥±Ì°¥±”™¥±”°UÍ‰UÑ¥±…µ•Ì¹…µ”ÕÍ‰UÑ¥°°±½¹œ‰åÑ•Ì¤ì(€€€€€€€€€€€Ñ¡¥Ì¹Ñ¥Ñ±”€ôÑ¥Ñ±”ì(€€€€€€€€€€€Ñ¡¥Ì¹‘•Ñ…¥±Ì€ô‘•Ñ…¥±Ìì(€€€€€€€€€€€Ñ¡¥Ì¹™¥±”€ô™¥±”ì(€€€€€€€€€€€Ñ¡¥Ì¹ÕÍ‰UÑ¥°€ôÕÍ‰UÑ¥°ì(€€€€€€€€€€€Ñ¡¥Ì¹‰åÑ•Ì€ô‰åÑ•Ìì(€€€€€€€ô((€€€€€€€ÍÑ…Ñ¥Œ…µ•¹ÑÉä¥Í¼¡¥±”™¥±”°MÑÉ¥¹œ‘•Ñ…¥±Ì¤ì(€€€€€€€€€€€É•ÑÕÉ¸¹•Ü…µ•¹ÑÉä¡™¥±”¹•Ñ9…µ” ¤°‘•Ñ…¥±Ì°™¥±”°¹Õ±°°™¥±”¹±•¹Ñ  ¤¤ì(€€€€€€€ô((€€€€€€€ÍÑ…Ñ¥Œ…µ•¹ÑÉäÕÍ‰UÑ¥°¡UÍ‰UÑ¥±…µ•Ì¹…µ”…µ”°MÑÉ¥¹œ‘•Ñ…¥±Ì¤ì(€€€€€€€€€€€É•ÑÕÉ¸¹•Ü…µ•¹ÑÉä¡…µ”¹Ñ¥Ñ±”°‘•Ñ…¥±Ì°¹Õ±°°…µ”°…µ”¹‰åÑ•Ì¤ì(€€€€€€€ô(€€€ô)ô(
